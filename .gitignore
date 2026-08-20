@@ -1,0 +1,29 @@
+# Build output
+build/
+out/
+
+# Visual Studio / CMake generated files
+.vs/
+CMakeUserPresets.json
+*.suo
+*.user
+*.vcxproj.user
+
+# Runtime/deployment binaries
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.obj
+*.idb
+*.ipdb
+*.iobj
+
+# Local indexes
+.codegraph/
+.gitnexus/
+
+# OS/editor noise
+Thumbs.db
+.DS_Store
