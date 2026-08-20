@@ -2,6 +2,9 @@
 build/
 out/
 
+# Local sample datasets
+data/
+
 # Visual Studio / CMake generated files
 .vs/
 CMakeUserPresets.json
