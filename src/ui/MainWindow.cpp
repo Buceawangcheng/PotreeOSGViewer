@@ -4,6 +4,8 @@
 #include "viewer/OsgViewWidget.h"
 
 #include <QAction>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -97,6 +99,29 @@ void MainWindow::createToolbar()
             this, [this](double value) {
                 m_viewWidget->setPointSize(static_cast<float>(value));
             });
+
+    toolbar->addSeparator();
+    toolbar->addWidget(new QLabel(tr("Color"), toolbar));
+
+    m_colorModeComboBox = new QComboBox(toolbar);
+    m_colorModeComboBox->addItem(tr("Original RGB"),
+                                 static_cast<int>(PotreeColorMode::OriginalRgb));
+    m_colorModeComboBox->addItem(tr("LOD Level"),
+                                 static_cast<int>(PotreeColorMode::LodLevel));
+    toolbar->addWidget(m_colorModeComboBox);
+
+    connect(m_colorModeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+                const PotreeColorMode mode = static_cast<PotreeColorMode>(
+                    m_colorModeComboBox->itemData(index).toInt());
+                m_viewWidget->setPotreeColorMode(mode);
+            });
+
+    m_boundsCheckBox = new QCheckBox(tr("Node Bounds"), toolbar);
+    m_boundsCheckBox->setChecked(false);
+    toolbar->addWidget(m_boundsCheckBox);
+    connect(m_boundsCheckBox, &QCheckBox::toggled,
+            m_viewWidget, &OsgViewWidget::setPotreeBoundingBoxesVisible);
 }
 
 void MainWindow::createStatusBar()
@@ -144,20 +169,17 @@ void MainWindow::openPotreeMetadata()
         return;
     }
 
-    if (dataset->encoding == QLatin1String("DEFAULT")) {
-        std::shared_ptr<PointCloudNodeData> rootData = provider.loadNodeData(
-            *dataset,
-            dataset->root.get(),
-            &error);
-        if (!rootData) {
-            QMessageBox::critical(this, tr("Open Potree Point Data Failed"), error);
-            return;
-        }
+    if (dataset->encoding != QLatin1String("DEFAULT")) {
+        QMessageBox::critical(this,
+                              tr("Open Potree Dataset Failed"),
+                              tr("Point data decoding for Potree encoding '%1' is not supported yet.")
+                                  .arg(dataset->encoding));
+        return;
+    }
 
-        if (!m_viewWidget->loadPotreeNode(*dataset, *rootData, &error)) {
-            QMessageBox::critical(this, tr("Display Potree Point Data Failed"), error);
-            return;
-        }
+    if (!m_viewWidget->loadPotreeDataset(dataset, &error)) {
+        QMessageBox::critical(this, tr("Display Potree Dataset Failed"), error);
+        return;
     }
 
     m_potreeMetadataDataset = std::move(dataset);

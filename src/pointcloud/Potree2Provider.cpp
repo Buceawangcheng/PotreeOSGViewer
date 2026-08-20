@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -282,6 +283,159 @@ std::uint32_t maxLoadedLevel(const OctreeNode& node)
 
     return level;
 }
+
+OctreeNode* findNode(OctreeNode* node, const std::string& id)
+{
+    if (!node) {
+        return nullptr;
+    }
+    if (node->id == id) {
+        return node;
+    }
+
+    for (std::unique_ptr<OctreeNode>& child : node->children) {
+        if (OctreeNode* found = findNode(child.get(), id)) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+const OctreeNode* findNode(const OctreeNode* node, const std::string& id)
+{
+    return findNode(const_cast<OctreeNode*>(node), id);
+}
+
+bool parseHierarchyChunkBytes(const QByteArray& chunk,
+                              const QString& hierarchyPath,
+                              const std::string& rootNodeId,
+                              std::uint32_t rootLevel,
+                              const BoundingBox& rootBounds,
+                              std::uint64_t chunkByteOffset,
+                              std::uint64_t chunkByteSize,
+                              HierarchyPatch* patch,
+                              QString* errorMessage)
+{
+    if ((chunk.size() % HierarchyRecordSize) != 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Invalid hierarchy chunk size in %1: %2 is not divisible by %3.")
+                                .arg(hierarchyPath)
+                                .arg(chunk.size())
+                                .arg(HierarchyRecordSize);
+        }
+        return false;
+    }
+
+    patch->rootNodeId = rootNodeId;
+    patch->chunkByteOffset = chunkByteOffset;
+    patch->chunkByteSize = chunkByteSize;
+    patch->nodes.clear();
+
+    HierarchyNodePatch rootPatch;
+    rootPatch.id = rootNodeId;
+    rootPatch.level = rootLevel;
+    rootPatch.bounds = rootBounds;
+    patch->nodes.push_back(rootPatch);
+
+    const int recordCount = chunk.size() / HierarchyRecordSize;
+    const uchar* bytes = reinterpret_cast<const uchar*>(chunk.constData());
+    for (int recordIndex = 0; recordIndex < recordCount; ++recordIndex) {
+        if (recordIndex >= static_cast<int>(patch->nodes.size())) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Hierarchy record %1 in %2 has no matching BFS node.")
+                                    .arg(recordIndex)
+                                    .arg(hierarchyPath);
+            }
+            return false;
+        }
+
+        HierarchyNodePatch& node = patch->nodes[static_cast<std::size_t>(recordIndex)];
+        const uchar* record = bytes + (recordIndex * HierarchyRecordSize);
+        const std::uint8_t recordType = record[0];
+        const std::uint8_t childMask = record[1];
+        const std::uint32_t numPoints = qFromLittleEndian<std::uint32_t>(record + 2);
+        const std::uint64_t byteOffset = qFromLittleEndian<std::uint64_t>(record + 6);
+        const std::uint64_t byteSize = qFromLittleEndian<std::uint64_t>(record + 14);
+
+        if (!octreeNodeTypeFromRecord(recordType, &node.type)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Invalid hierarchy node type %1 at record %2 in %3.")
+                                    .arg(recordType)
+                                    .arg(recordIndex)
+                                    .arg(hierarchyPath);
+            }
+            return false;
+        }
+
+        node.childMask = childMask;
+        node.pointCount = byteSize == 0 ? 0 : numPoints;
+
+        if (node.type == OctreeNodeType::Proxy) {
+            node.hierarchyByteOffset = byteOffset;
+            node.hierarchyByteSize = byteSize;
+            continue;
+        }
+
+        node.pointByteOffset = byteOffset;
+        node.pointByteSize = byteSize;
+        const std::string parentId = node.id;
+        const std::uint32_t parentLevel = node.level;
+        const BoundingBox parentBounds = node.bounds;
+
+        for (int childIndex = 0; childIndex < 8; ++childIndex) {
+            const std::uint8_t childBit = static_cast<std::uint8_t>(1u << childIndex);
+            if ((childMask & childBit) == 0) {
+                continue;
+            }
+
+            HierarchyNodePatch child;
+            child.id = parentId + static_cast<char>('0' + childIndex);
+            child.level = parentLevel + 1;
+            child.bounds = childBounds(parentBounds, childIndex);
+            patch->nodes.push_back(child);
+        }
+    }
+
+    if (patch->nodes.size() != static_cast<std::size_t>(recordCount)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Hierarchy chunk in %1 ended before all declared child records were loaded.")
+                                .arg(hierarchyPath);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+void applyNodePatch(const HierarchyNodePatch& patch, OctreeNode* node)
+{
+    node->id = patch.id;
+    node->level = patch.level;
+    node->bounds = patch.bounds;
+    node->pointCount = patch.pointCount;
+    node->childMask = patch.childMask;
+    node->type = patch.type;
+    node->pointDataState = PointDataState::Unloaded;
+    node->gpuState = GpuState::Detached;
+    node->data.reset();
+    node->cpuBytes = 0;
+    node->gpuBytes = 0;
+
+    if (patch.type == OctreeNodeType::Proxy) {
+        node->hierarchyState = HierarchyState::Proxy;
+        node->hierarchyByteOffset = patch.hierarchyByteOffset;
+        node->hierarchyByteSize = patch.hierarchyByteSize;
+        node->pointByteOffset = 0;
+        node->pointByteSize = 0;
+    } else {
+        node->hierarchyState = HierarchyState::Resolved;
+        node->hierarchyByteOffset = 0;
+        node->hierarchyByteSize = 0;
+        node->pointByteOffset = patch.pointByteOffset;
+        node->pointByteSize = patch.pointByteSize;
+    }
+}
 } // namespace
 
 bool Potree2Provider::canOpen(const QString& path) const
@@ -321,6 +475,7 @@ std::shared_ptr<PointCloudDataset> Potree2Provider::openMetadata(const QString& 
     dataset->scale = metadata.scale;
     dataset->bounds = metadata.bounds;
     dataset->attributes = std::move(metadata.attributes);
+    dataset->hierarchyDepth = metadata.hierarchy.depth;
 
     if (!parseFirstHierarchyChunk(metadata, dataset.get(), errorMessage)) {
         return nullptr;
@@ -350,7 +505,7 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
             *errorMessage = QStringLiteral("Point data decoding for Potree encoding '%1' is not supported yet.")
                                 .arg(dataset.encoding);
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
@@ -359,19 +514,19 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
             *errorMessage = QStringLiteral("Node '%1' is a hierarchy proxy and has no point-data range.")
                                 .arg(QString::fromStdString(node->id));
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
     const std::uint32_t recordSize = dataset.attributes.pointRecordSizeBytes();
     if (recordSize == 0
         || node->pointCount > std::numeric_limits<std::uint64_t>::max() / recordSize
-        || node->pointCount * recordSize != node->byteSize) {
+        || node->pointCount * recordSize != node->pointByteSize) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Node '%1' byte size does not match its point count and metadata record size.")
                                 .arg(QString::fromStdString(node->id));
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
@@ -387,7 +542,7 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
         if (errorMessage) {
             *errorMessage = QStringLiteral("DEFAULT decoding requires a 3-component int32 'position' attribute.");
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
@@ -404,17 +559,17 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
         if (errorMessage) {
             *errorMessage = QStringLiteral("DEFAULT decoding requires 'rgb' to contain three uint16 components.");
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
-    if (node->byteOffset > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())
-        || node->byteSize > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    if (node->pointByteOffset > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())
+        || node->pointByteSize > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Node '%1' point-data range is too large for this synchronous loader.")
                                 .arg(QString::fromStdString(node->id));
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
@@ -424,39 +579,39 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
         if (errorMessage) {
             *errorMessage = QStringLiteral("Failed to open octree.bin:\n%1").arg(octreePath);
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
     const std::uint64_t fileSize = static_cast<std::uint64_t>(octreeFile.size());
-    if (node->byteOffset > fileSize || node->byteSize > fileSize - node->byteOffset) {
+    if (node->pointByteOffset > fileSize || node->pointByteSize > fileSize - node->pointByteOffset) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Node '%1' point-data range lies outside %2.")
                                 .arg(QString::fromStdString(node->id), octreePath);
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
-    node->loadState = OctreeNodeLoadState::Loading;
-    if (!octreeFile.seek(static_cast<qint64>(node->byteOffset))) {
+    node->pointDataState = PointDataState::Loading;
+    if (!octreeFile.seek(static_cast<qint64>(node->pointByteOffset))) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Failed to seek to node '%1' in %2.")
                                 .arg(QString::fromStdString(node->id), octreePath);
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
-    const QByteArray encoded = octreeFile.read(static_cast<qint64>(node->byteSize));
-    if (encoded.size() != static_cast<int>(node->byteSize)) {
+    const QByteArray encoded = octreeFile.read(static_cast<qint64>(node->pointByteSize));
+    if (encoded.size() != static_cast<int>(node->pointByteSize)) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Failed to read node '%1' from %2. Expected %3 bytes, got %4 bytes.")
                                 .arg(QString::fromStdString(node->id), octreePath)
-                                .arg(node->byteSize)
+                                .arg(node->pointByteSize)
                                 .arg(encoded.size());
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
@@ -465,7 +620,7 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
             *errorMessage = QStringLiteral("Node '%1' contains too many points for this process.")
                                 .arg(QString::fromStdString(node->id));
         }
-        node->loadState = OctreeNodeLoadState::Failed;
+        node->pointDataState = PointDataState::Failed;
         return nullptr;
     }
 
@@ -503,8 +658,233 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
 
     node->data = data;
     node->cpuBytes = data->cpuBytes();
-    node->loadState = OctreeNodeLoadState::CpuReady;
+    node->pointDataState = PointDataState::CpuReady;
     return data;
+}
+
+std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
+    const PointCloudDataset& dataset,
+    const NodeLoadRequest& request,
+    QString* errorMessage) const
+{
+    OctreeNode node;
+    node.id = request.nodeId;
+    node.level = request.level;
+    node.bounds = request.bounds;
+    node.pointCount = request.pointCount;
+    node.type = request.type;
+    node.hierarchyState = request.hierarchyState;
+    node.hierarchyByteOffset = request.hierarchyByteOffset;
+    node.hierarchyByteSize = request.hierarchyByteSize;
+    node.pointByteOffset = request.pointByteOffset;
+    node.pointByteSize = request.pointByteSize;
+    return loadNodeData(dataset, &node, errorMessage);
+}
+
+NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset,
+                                                const NodeLoadRequest& request) const
+{
+    NodeLoadResult result;
+    result.datasetGeneration = request.datasetGeneration;
+    result.nodeId = request.nodeId;
+    result.requestGeneration = request.requestGeneration;
+
+    QString error;
+    NodeLoadRequest pointRequest = request;
+    if (request.hierarchyState == HierarchyState::Proxy) {
+        OctreeNode proxy;
+        proxy.id = request.nodeId;
+        proxy.level = request.level;
+        proxy.bounds = request.bounds;
+        proxy.type = OctreeNodeType::Proxy;
+        proxy.hierarchyState = HierarchyState::Proxy;
+        proxy.hierarchyByteOffset = request.hierarchyByteOffset;
+        proxy.hierarchyByteSize = request.hierarchyByteSize;
+
+        if (!loadHierarchyPatch(dataset, proxy, &result.hierarchyPatch, &error)) {
+            result.error = error;
+            return result;
+        }
+
+        if (result.hierarchyPatch.nodes.empty()
+            || result.hierarchyPatch.nodes.front().type == OctreeNodeType::Proxy) {
+            result.error = QStringLiteral("Hierarchy patch for node '%1' did not resolve point data.")
+                               .arg(QString::fromStdString(request.nodeId));
+            return result;
+        }
+
+        const HierarchyNodePatch& rootPatch = result.hierarchyPatch.nodes.front();
+        pointRequest.type = rootPatch.type;
+        pointRequest.hierarchyState = HierarchyState::Resolved;
+        pointRequest.pointCount = rootPatch.pointCount;
+        pointRequest.pointByteOffset = rootPatch.pointByteOffset;
+        pointRequest.pointByteSize = rootPatch.pointByteSize;
+    }
+
+    result.pointData = loadNodeData(dataset, pointRequest, &error);
+    if (!result.pointData) {
+        result.error = error;
+    }
+    return result;
+}
+
+bool Potree2Provider::loadHierarchyPatch(const PointCloudDataset& dataset,
+                                         const OctreeNode& proxyNode,
+                                         HierarchyPatch* patch,
+                                         QString* errorMessage) const
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+
+    if (!patch) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Cannot load hierarchy into a null patch.");
+        }
+        return false;
+    }
+
+    if (proxyNode.hierarchyState != HierarchyState::Proxy
+        || proxyNode.hierarchyByteSize == 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Node '%1' is not an unresolved hierarchy proxy.")
+                                .arg(QString::fromStdString(proxyNode.id));
+        }
+        return false;
+    }
+
+    if (proxyNode.hierarchyByteOffset > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())
+        || proxyNode.hierarchyByteSize > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Node '%1' hierarchy range is too large for this loader.")
+                                .arg(QString::fromStdString(proxyNode.id));
+        }
+        return false;
+    }
+
+    const QString hierarchyPath = QDir(dataset.sourcePath).filePath(QStringLiteral("hierarchy.bin"));
+    QFile hierarchyFile(hierarchyPath);
+    if (!hierarchyFile.open(QIODevice::ReadOnly)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Failed to open hierarchy.bin:\n%1").arg(hierarchyPath);
+        }
+        return false;
+    }
+
+    const std::uint64_t fileSize = static_cast<std::uint64_t>(hierarchyFile.size());
+    if (proxyNode.hierarchyByteOffset > fileSize
+        || proxyNode.hierarchyByteSize > fileSize - proxyNode.hierarchyByteOffset) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Node '%1' hierarchy range lies outside %2.")
+                                .arg(QString::fromStdString(proxyNode.id), hierarchyPath);
+        }
+        return false;
+    }
+
+    if (!hierarchyFile.seek(static_cast<qint64>(proxyNode.hierarchyByteOffset))) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Failed to seek to hierarchy node '%1' in %2.")
+                                .arg(QString::fromStdString(proxyNode.id), hierarchyPath);
+        }
+        return false;
+    }
+
+    const QByteArray chunk = hierarchyFile.read(static_cast<qint64>(proxyNode.hierarchyByteSize));
+    if (chunk.size() != static_cast<int>(proxyNode.hierarchyByteSize)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Failed to read hierarchy node '%1' from %2. Expected %3 bytes, got %4 bytes.")
+                                .arg(QString::fromStdString(proxyNode.id), hierarchyPath)
+                                .arg(proxyNode.hierarchyByteSize)
+                                .arg(chunk.size());
+        }
+        return false;
+    }
+
+    return parseHierarchyChunkBytes(chunk,
+                                    hierarchyPath,
+                                    proxyNode.id,
+                                    proxyNode.level,
+                                    proxyNode.bounds,
+                                    proxyNode.hierarchyByteOffset,
+                                    proxyNode.hierarchyByteSize,
+                                    patch,
+                                    errorMessage);
+}
+
+bool Potree2Provider::applyHierarchyPatch(PointCloudDataset* dataset,
+                                          const HierarchyPatch& patch,
+                                          QString* errorMessage) const
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+
+    if (!dataset || !dataset->root) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Cannot apply hierarchy patch without a dataset root.");
+        }
+        return false;
+    }
+
+    if (patch.nodes.empty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Cannot apply an empty hierarchy patch.");
+        }
+        return false;
+    }
+
+    OctreeNode* rootNode = findNode(dataset->root.get(), patch.rootNodeId);
+    if (!rootNode) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Hierarchy patch root '%1' no longer exists.")
+                                .arg(QString::fromStdString(patch.rootNodeId));
+        }
+        return false;
+    }
+
+    for (const HierarchyNodePatch& nodePatch : patch.nodes) {
+        OctreeNode* node = findNode(dataset->root.get(), nodePatch.id);
+        if (!node) {
+            if (nodePatch.id.size() <= 1) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("Hierarchy patch cannot create root '%1'.")
+                                        .arg(QString::fromStdString(nodePatch.id));
+                }
+                return false;
+            }
+
+            const std::string parentId = nodePatch.id.substr(0, nodePatch.id.size() - 1);
+            const char childChar = nodePatch.id.back();
+            if (childChar < '0' || childChar > '7') {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("Hierarchy patch node '%1' has an invalid child index.")
+                                        .arg(QString::fromStdString(nodePatch.id));
+                }
+                return false;
+            }
+
+            OctreeNode* parent = findNode(dataset->root.get(), parentId);
+            if (!parent) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("Hierarchy patch parent '%1' no longer exists.")
+                                        .arg(QString::fromStdString(parentId));
+                }
+                return false;
+            }
+
+            const int childIndex = childChar - '0';
+            if (!parent->children[childIndex]) {
+                parent->children[childIndex] = std::make_unique<OctreeNode>();
+            }
+            node = parent->children[childIndex].get();
+        }
+
+        applyNodePatch(nodePatch, node);
+    }
+
+    dataset->hierarchyRecordsLoaded += patch.nodes.size();
+    dataset->maxLoadedLevel = maxLoadedLevel(*dataset->root);
+    return true;
 }
 
 bool Potree2Provider::resolveDatasetPaths(const QString& path,
@@ -779,8 +1159,9 @@ bool Potree2Provider::parseFirstHierarchyChunk(const PotreeMetadata& metadata,
     dataset->root->bounds = metadata.bounds;
     dataset->root->level = 0;
     dataset->root->type = OctreeNodeType::Proxy;
-    dataset->root->byteOffset = 0;
-    dataset->root->byteSize = metadata.hierarchy.firstChunkSize;
+    dataset->root->hierarchyState = HierarchyState::Proxy;
+    dataset->root->hierarchyByteOffset = 0;
+    dataset->root->hierarchyByteSize = metadata.hierarchy.firstChunkSize;
 
     std::vector<OctreeNode*> nodes;
     nodes.reserve(static_cast<std::size_t>(recordCount));
@@ -817,9 +1198,19 @@ bool Potree2Provider::parseFirstHierarchyChunk(const PotreeMetadata& metadata,
 
         node->childMask = childMask;
         node->pointCount = byteSize == 0 ? 0 : numPoints;
-        node->byteOffset = byteOffset;
-        node->byteSize = byteSize;
-        node->loadState = OctreeNodeLoadState::Unloaded;
+        node->pointDataState = PointDataState::Unloaded;
+
+        if (node->type == OctreeNodeType::Proxy) {
+            node->hierarchyState = HierarchyState::Proxy;
+            node->hierarchyByteOffset = byteOffset;
+            node->hierarchyByteSize = byteSize;
+            node->pointByteOffset = 0;
+            node->pointByteSize = 0;
+        } else {
+            node->hierarchyState = HierarchyState::Resolved;
+            node->pointByteOffset = byteOffset;
+            node->pointByteSize = byteSize;
+        }
 
         dataset->firstChunkPointCount += node->pointCount;
         if (node->type == OctreeNodeType::Proxy) {
@@ -837,7 +1228,7 @@ bool Potree2Provider::parseFirstHierarchyChunk(const PotreeMetadata& metadata,
             child->id = node->id + static_cast<char>('0' + childIndex);
             child->level = node->level + 1;
             child->bounds = childBounds(node->bounds, childIndex);
-            child->loadState = OctreeNodeLoadState::Unloaded;
+            child->pointDataState = PointDataState::Unloaded;
 
             nodes.push_back(child.get());
             node->children[childIndex] = std::move(child);

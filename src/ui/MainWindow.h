@@ -5,7 +5,9 @@
 #include <memory>
 
 class QAction;
+class QCheckBox;
 class QLabel;
+class QComboBox;
 class QDoubleSpinBox;
 class OsgViewWidget;
 class PointCloudDataset;
@@ -35,5 +37,7 @@ private:
     QLabel* m_fileLabel = nullptr;
     QLabel* m_pointCountLabel = nullptr;
     QDoubleSpinBox* m_pointSizeSpinBox = nullptr;
+    QComboBox* m_colorModeComboBox = nullptr;
+    QCheckBox* m_boundsCheckBox = nullptr;
     std::shared_ptr<PointCloudDataset> m_potreeMetadataDataset;
 };

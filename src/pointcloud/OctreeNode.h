@@ -15,14 +15,25 @@ enum class OctreeNodeType {
     Proxy
 };
 
-enum class OctreeNodeLoadState {
+enum class HierarchyState {
+    Resolved,
+    Proxy,
+    Queued,
+    Loading,
+    Failed
+};
+
+enum class PointDataState {
     Unloaded,
     Queued,
     Loading,
     CpuReady,
-    Attached,
-    Failed,
-    Evicting
+    Failed
+};
+
+enum class GpuState {
+    Detached,
+    Resident
 };
 
 struct OctreeNode {
@@ -32,10 +43,20 @@ struct OctreeNode {
     std::uint64_t pointCount = 0;
     std::uint8_t childMask = 0;
     OctreeNodeType type = OctreeNodeType::Leaf;
-    OctreeNodeLoadState loadState = OctreeNodeLoadState::Unloaded;
-    std::uint64_t byteOffset = 0;
-    std::uint64_t byteSize = 0;
+    HierarchyState hierarchyState = HierarchyState::Resolved;
+    PointDataState pointDataState = PointDataState::Unloaded;
+    GpuState gpuState = GpuState::Detached;
+    std::uint64_t hierarchyByteOffset = 0;
+    std::uint64_t hierarchyByteSize = 0;
+    std::uint64_t pointByteOffset = 0;
+    std::uint64_t pointByteSize = 0;
+    std::uint64_t lastSelectedFrame = 0;
+    std::uint64_t lastVisibleFrame = 0;
     std::uint64_t lastAccessFrame = 0;
+    std::uint64_t requestGeneration = 0;
+    double selectionWeight = 0.0;
+    double requestWeight = 0.0;
+    std::uint64_t lastRequestedFrame = 0;
     std::uint64_t cpuBytes = 0;
     std::uint64_t gpuBytes = 0;
     std::shared_ptr<PointCloudNodeData> data;

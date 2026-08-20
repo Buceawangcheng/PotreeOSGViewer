@@ -98,7 +98,19 @@ set_target_properties(osgQOpenGL::osgQOpenGL PROPERTIES
 add_executable(PotreeOSGViewer
     src/main.cpp
     src/pointcloud/BoundingBox.h
+    src/pointcloud/CameraState.h
+    src/pointcloud/HierarchyPatch.h
+    src/pointcloud/LodSelector.cpp
+    src/pointcloud/LodSelector.h
+    src/pointcloud/NodeLoadRequest.h
+    src/pointcloud/NodeLoadResult.h
+    src/pointcloud/NodeLoadScheduler.cpp
+    src/pointcloud/NodeLoadScheduler.h
     src/pointcloud/OctreeNode.h
+    src/pointcloud/PointCloudRuntime.cpp
+    src/pointcloud/PointCloudRuntime.h
+    src/pointcloud/PointCloudUpdateCallback.cpp
+    src/pointcloud/PointCloudUpdateCallback.h
     src/pointcloud/PointAttributes.h
     src/pointcloud/PointCloudDataset.h
     src/pointcloud/PointCloudLayer.h
@@ -111,6 +123,10 @@ add_executable(PotreeOSGViewer
     src/ui/MainWindow.h
     src/viewer/OsgViewWidget.cpp
     src/viewer/OsgViewWidget.h
+    src/viewer/PotreeColorMode.h
+    src/viewer/PotreeRenderMasks.h
+    src/viewer/PotreeSceneBackend.cpp
+    src/viewer/PotreeSceneBackend.h
     src/viewer/SceneManager.cpp
     src/viewer/SceneManager.h
 )
@@ -137,6 +153,14 @@ if(BUILD_TESTING)
     add_executable(PotreePointCloudTests
         tests/PointCloudTests.cpp
         src/pointcloud/BoundingBox.h
+        src/pointcloud/CameraState.h
+        src/pointcloud/HierarchyPatch.h
+        src/pointcloud/LodSelector.cpp
+        src/pointcloud/LodSelector.h
+        src/pointcloud/NodeLoadRequest.h
+        src/pointcloud/NodeLoadResult.h
+        src/pointcloud/NodeLoadScheduler.cpp
+        src/pointcloud/NodeLoadScheduler.h
         src/pointcloud/OctreeNode.h
         src/pointcloud/PointAttributes.h
         src/pointcloud/PointCloudDataset.h
@@ -147,6 +171,10 @@ if(BUILD_TESTING)
         src/pointcloud/Potree2Provider.h
         src/viewer/SceneManager.cpp
         src/viewer/SceneManager.h
+        src/viewer/PotreeColorMode.h
+        src/viewer/PotreeRenderMasks.h
+        src/viewer/PotreeSceneBackend.cpp
+        src/viewer/PotreeSceneBackend.h
     )
 
     target_link_libraries(PotreePointCloudTests PRIVATE

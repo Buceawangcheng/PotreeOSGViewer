@@ -2,6 +2,7 @@
 
 #include "pointcloud/PointCloudDataset.h"
 #include "pointcloud/PointCloudNodeData.h"
+#include "viewer/PotreeSceneBackend.h"
 
 #include <osg/Array>
 #include <osg/Geode>
@@ -16,6 +17,7 @@
 #include <osgDB/ReadFile>
 
 #include <limits>
+#include <memory>
 
 namespace
 {
@@ -53,8 +55,11 @@ public:
 
 SceneManager::SceneManager()
     : m_root(new osg::Group)
+    , m_potreeBackend(std::make_unique<PotreeSceneBackend>(m_root.get()))
 {
 }
+
+SceneManager::~SceneManager() = default;
 
 osg::Group* SceneManager::root() const
 {
@@ -90,56 +95,67 @@ bool SceneManager::loadPotreeNode(const PointCloudDataset& dataset,
                                   float pointSize,
                                   QString* errorMessage)
 {
-    if (data.positions.empty() || data.positions.size() != data.colors.size()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("Decoded Potree node has invalid position/color arrays.");
-        }
-        return false;
-    }
-
-    if (data.positions.size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("Decoded Potree node has too many points for one OSG draw call.");
-        }
-        return false;
-    }
-
-    osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
-    vertices->assign(data.positions.begin(), data.positions.end());
-
-    osg::ref_ptr<osg::Vec4ubArray> colors = new osg::Vec4ubArray;
-    colors->assign(data.colors.begin(), data.colors.end());
-
-    osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
-    geometry->setUseDisplayList(false);
-    geometry->setUseVertexBufferObjects(true);
-    geometry->setVertexArray(vertices.get());
-    geometry->setColorArray(colors.get(), osg::Array::BIND_PER_VERTEX);
-    geometry->addPrimitiveSet(new osg::DrawArrays(
-        GL_POINTS,
-        0,
-        static_cast<GLsizei>(data.positions.size())));
-
-    osg::ref_ptr<osg::Geode> geode = new osg::Geode;
-    geode->addDrawable(geometry.get());
-
-    osg::ref_ptr<osg::MatrixTransform> transform = new osg::MatrixTransform;
-    transform->setMatrix(osg::Matrixd::translate(data.origin));
-    transform->addChild(geode.get());
-    applyPointCloudState(transform.get(), pointSize);
-
     clear();
-    m_root->addChild(transform.get());
-    m_pointCloudNode = transform;
+    m_potreeBackend->beginLayer(dataset, pointSize);
+    if (!m_potreeBackend->attachNode(
+            "r", 0, dataset.bounds, dataset, data, pointSize, errorMessage)) {
+        clear();
+        return false;
+    }
     m_currentFilePath = dataset.sourcePath;
-    m_pointCount = static_cast<std::uint64_t>(data.positions.size());
+    m_pointCount = m_potreeBackend->pointCount();
     return true;
+}
+
+void SceneManager::beginPotreeLayer(const PointCloudDataset& dataset, float pointSize)
+{
+    clear();
+    m_potreeBackend->beginLayer(dataset, pointSize);
+    m_currentFilePath = dataset.sourcePath;
+    m_pointCount = 0;
+}
+
+bool SceneManager::attachPotreeNode(const std::string& nodeId,
+                                    std::uint32_t level,
+                                    const BoundingBox& bounds,
+                                    const PointCloudDataset& dataset,
+                                    const PointCloudNodeData& data,
+                                    float pointSize,
+                                    QString* errorMessage)
+{
+    if (!m_potreeBackend->attachNode(
+            nodeId, level, bounds, dataset, data, pointSize, errorMessage)) {
+        return false;
+    }
+
+    m_currentFilePath = dataset.sourcePath;
+    m_pointCount = m_potreeBackend->pointCount();
+    return true;
+}
+
+void SceneManager::setPotreeNodeVisible(const std::string& nodeId, bool visible)
+{
+    m_potreeBackend->setNodeVisible(nodeId, visible);
+}
+
+void SceneManager::removePotreeNode(const std::string& nodeId)
+{
+    m_potreeBackend->removeNode(nodeId);
+    m_pointCount = m_potreeBackend->pointCount();
+}
+
+bool SceneManager::hasPotreeNode(const std::string& nodeId) const
+{
+    return m_potreeBackend->hasNode(nodeId);
 }
 
 void SceneManager::clear()
 {
     if (m_pointCloudNode.valid()) {
         m_root->removeChild(m_pointCloudNode.get());
+    }
+    if (m_potreeBackend) {
+        m_potreeBackend->clear();
     }
 
     m_pointCloudNode = nullptr;
@@ -149,11 +165,19 @@ void SceneManager::clear()
 
 void SceneManager::setPointSize(float pointSize)
 {
-    if (!m_pointCloudNode.valid()) {
-        return;
+    if (m_pointCloudNode.valid()) {
+        applyPointCloudState(m_pointCloudNode.get(), pointSize);
     }
+    if (m_potreeBackend) {
+        m_potreeBackend->setPointSize(pointSize);
+    }
+}
 
-    applyPointCloudState(m_pointCloudNode.get(), pointSize);
+void SceneManager::setPotreeColorMode(PotreeColorMode mode)
+{
+    if (m_potreeBackend) {
+        m_potreeBackend->setColorMode(mode);
+    }
 }
 
 QString SceneManager::currentFilePath() const

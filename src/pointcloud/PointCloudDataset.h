@@ -28,6 +28,7 @@ public:
     std::unique_ptr<OctreeNode> root;
 
     std::uint64_t hierarchyRecordsLoaded = 0;
+    std::uint32_t hierarchyDepth = 0;
     std::uint32_t maxLoadedLevel = 0;
     std::uint64_t firstChunkPointCount = 0;
     std::uint64_t proxyNodeCount = 0;

@@ -1,6 +1,8 @@
 # PotreeOSGViewer
 
-独立 Qt + osgQt + OpenSceneGraph 点云查看器工程。当前已完成基础 PLY 查看、Potree 2.x 数据模型和 DEFAULT 根节点显示链路。
+独立 Qt + osgQt + OpenSceneGraph 点云查看器工程。当前已完成基础 PLY 查看以及 Potree 2.x DEFAULT 数据集的异步 LOD 流式显示链路。
+
+阶段 1-3 的完成内容、测试证据和当前限制见 [`docs/stage1-3-summary.md`](docs/stage1-3-summary.md)。
 
 ## 已确认依赖
 
@@ -31,7 +33,7 @@
 & "D:\Qt\MyQt\Tools\CMake_64\bin\ctest.exe" --test-dir build -C Debug --output-on-failure
 ```
 
-测试使用运行时生成的小型 Potree fixture，不会读取或提交本地 `data/` 目录。
+测试主要使用运行时生成的小型 Potree fixture；如果存在本地 `data/` 样例，还会验证完整 hierarchy 统计。`data/` 不会提交。
 
 ## 运行
 
@@ -59,16 +61,22 @@
 - 点大小调整
 - 状态栏显示文件名和点数
 - 从数据集目录或 `metadata.json` 打开 Potree 2.x 数据
-- 解析 metadata 和首个 hierarchy chunk
-- 按 hierarchy 的 offset/size 精确读取 `octree.bin`
-- 解码 DEFAULT 编码的 position 和 rgb，并显示根节点
+- 解析 metadata、首个 hierarchy chunk，并按需展开 Proxy hierarchy
+- 按 hierarchy 的 offset/size 异步读取和解码 `octree.bin` 节点
+- best-first LOD 选择、视锥剔除、点预算和最小像素阈值
+- 多节点渐进挂接、显隐、基础 LRU 和 generation 失效保护
+- 解码 DEFAULT 编码的 position 和 RGB
 - 使用局部坐标顶点和场景平移保留大坐标精度
+- 原始 RGB / LOD 层级着色切换
+- 节点包围盒显示开关
+- Viewer 保持 SingleThreaded，OSG 场景修改集中在 update traversal
 
 ## 当前限制
 
 - PLY 仍是同步加载，加载大文件时界面可能短暂阻塞。
 - 点数统计按加载后 geometry 的 vertex array 数量估算。
-- Potree 当前只同步加载首个 hierarchy chunk 中的根节点。
 - BROTLI 点数据解码尚未实现；BROTLI metadata 和 hierarchy 仍可读取。
-- Proxy hierarchy 按需展开、LOD、异步加载和缓存管理尚未实现。
 - DEFAULT 的其他属性会保留布局信息，但目前只将 position 和 rgb 转成渲染数据。
+- 高度、强度、分类属性着色和 EDL 尚未实现。
+- 当前仅有基础点数限制和 LRU，尚未实现完整字节级多级缓存。
+- 失败节点尚未实现有限次数重试和退避策略。
