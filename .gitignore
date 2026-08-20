@@ -1,5 +1,6 @@
 # Build output
 build/
+build-codex/
 out/
 
 # Local sample datasets

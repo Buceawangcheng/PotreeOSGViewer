@@ -1,14 +1,21 @@
 #include "viewer/SceneManager.h"
 
+#include "pointcloud/PointCloudDataset.h"
+#include "pointcloud/PointCloudNodeData.h"
+
 #include <osg/Array>
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/GL>
+#include <osg/MatrixTransform>
 #include <osg/NodeVisitor>
 #include <osg/Point>
+#include <osg/PrimitiveSet>
 #include <osg/StateAttribute>
 #include <osg/StateSet>
 #include <osgDB/ReadFile>
+
+#include <limits>
 
 namespace
 {
@@ -75,6 +82,57 @@ bool SceneManager::loadPointCloud(const std::string& nativeFilePath,
     m_pointCloudNode = node;
     m_currentFilePath = displayFilePath;
     m_pointCount = pointCount;
+    return true;
+}
+
+bool SceneManager::loadPotreeNode(const PointCloudDataset& dataset,
+                                  const PointCloudNodeData& data,
+                                  float pointSize,
+                                  QString* errorMessage)
+{
+    if (data.positions.empty() || data.positions.size() != data.colors.size()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Decoded Potree node has invalid position/color arrays.");
+        }
+        return false;
+    }
+
+    if (data.positions.size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Decoded Potree node has too many points for one OSG draw call.");
+        }
+        return false;
+    }
+
+    osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
+    vertices->assign(data.positions.begin(), data.positions.end());
+
+    osg::ref_ptr<osg::Vec4ubArray> colors = new osg::Vec4ubArray;
+    colors->assign(data.colors.begin(), data.colors.end());
+
+    osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+    geometry->setUseDisplayList(false);
+    geometry->setUseVertexBufferObjects(true);
+    geometry->setVertexArray(vertices.get());
+    geometry->setColorArray(colors.get(), osg::Array::BIND_PER_VERTEX);
+    geometry->addPrimitiveSet(new osg::DrawArrays(
+        GL_POINTS,
+        0,
+        static_cast<GLsizei>(data.positions.size())));
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode;
+    geode->addDrawable(geometry.get());
+
+    osg::ref_ptr<osg::MatrixTransform> transform = new osg::MatrixTransform;
+    transform->setMatrix(osg::Matrixd::translate(data.origin));
+    transform->addChild(geode.get());
+    applyPointCloudState(transform.get(), pointSize);
+
+    clear();
+    m_root->addChild(transform.get());
+    m_pointCloudNode = transform;
+    m_currentFilePath = dataset.sourcePath;
+    m_pointCount = static_cast<std::uint64_t>(data.positions.size());
     return true;
 }
 

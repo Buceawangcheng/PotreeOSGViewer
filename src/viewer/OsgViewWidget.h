@@ -9,6 +9,8 @@
 #include <memory>
 
 class SceneManager;
+class PointCloudDataset;
+struct PointCloudNodeData;
 
 class OsgViewWidget : public osgQOpenGLWidget
 {
@@ -19,6 +21,9 @@ public:
     ~OsgViewWidget() override;
 
     bool loadPointCloud(const QString& filePath, QString* errorMessage = nullptr);
+    bool loadPotreeNode(const PointCloudDataset& dataset,
+                        const PointCloudNodeData& nodeData,
+                        QString* errorMessage = nullptr);
     void clearPointCloud();
 
     void setPointSize(float pointSize);

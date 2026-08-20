@@ -51,6 +51,34 @@ bool OsgViewWidget::loadPointCloud(const QString& filePath, QString* errorMessag
     return true;
 }
 
+bool OsgViewWidget::loadPotreeNode(const PointCloudDataset& dataset,
+                                   const PointCloudNodeData& nodeData,
+                                   QString* errorMessage)
+{
+    if (!m_initialized) {
+        if (errorMessage) {
+            *errorMessage = tr("The OSG viewer is not initialized yet.");
+        }
+        return false;
+    }
+
+    QString error;
+    {
+        OpenThreads::ScopedWriteLock lock(*mutex());
+        if (!m_sceneManager->loadPotreeNode(dataset, nodeData, m_pointSize, &error)) {
+            if (errorMessage) {
+                *errorMessage = error;
+            }
+            return false;
+        }
+    }
+
+    getOsgViewer()->home();
+    update();
+    emit pointCloudChanged(m_sceneManager->currentFilePath(), m_sceneManager->pointCount());
+    return true;
+}
+
 void OsgViewWidget::clearPointCloud()
 {
     {

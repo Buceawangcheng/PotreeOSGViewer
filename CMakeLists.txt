@@ -97,6 +97,16 @@ set_target_properties(osgQOpenGL::osgQOpenGL PROPERTIES
 
 add_executable(PotreeOSGViewer
     src/main.cpp
+    src/pointcloud/BoundingBox.h
+    src/pointcloud/OctreeNode.h
+    src/pointcloud/PointAttributes.h
+    src/pointcloud/PointCloudDataset.h
+    src/pointcloud/PointCloudLayer.h
+    src/pointcloud/PointCloudNodeData.h
+    src/pointcloud/PointCloudProvider.h
+    src/pointcloud/PotreeMetadata.h
+    src/pointcloud/Potree2Provider.cpp
+    src/pointcloud/Potree2Provider.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
     src/viewer/OsgViewWidget.cpp
@@ -120,6 +130,42 @@ target_link_libraries(PotreeOSGViewer PRIVATE
 target_include_directories(PotreeOSGViewer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(PotreePointCloudTests
+        tests/PointCloudTests.cpp
+        src/pointcloud/BoundingBox.h
+        src/pointcloud/OctreeNode.h
+        src/pointcloud/PointAttributes.h
+        src/pointcloud/PointCloudDataset.h
+        src/pointcloud/PointCloudNodeData.h
+        src/pointcloud/PointCloudProvider.h
+        src/pointcloud/PotreeMetadata.h
+        src/pointcloud/Potree2Provider.cpp
+        src/pointcloud/Potree2Provider.h
+        src/viewer/SceneManager.cpp
+        src/viewer/SceneManager.h
+    )
+
+    target_link_libraries(PotreePointCloudTests PRIVATE
+        Qt5::Core
+        unofficial::osg::osg
+        unofficial::osg::osgDB
+    )
+
+    target_include_directories(PotreePointCloudTests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${VCPKG_INSTALLED_DIR}/x64-windows/include"
+    )
+
+    if(MSVC)
+        target_compile_options(PotreePointCloudTests PRIVATE /W4 /permissive-)
+    endif()
+
+    add_test(NAME PotreePointCloudTests COMMAND PotreePointCloudTests)
+endif()
 
 if(MSVC)
     target_compile_options(PotreeOSGViewer PRIVATE /W4 /permissive-)

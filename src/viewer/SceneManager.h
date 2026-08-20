@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <string>
 
+class PointCloudDataset;
+struct PointCloudNodeData;
+
 class SceneManager
 {
 public:
@@ -18,6 +21,10 @@ public:
 
     bool loadPointCloud(const std::string& nativeFilePath,
                         const QString& displayFilePath,
+                        float pointSize,
+                        QString* errorMessage);
+    bool loadPotreeNode(const PointCloudDataset& dataset,
+                        const PointCloudNodeData& data,
                         float pointSize,
                         QString* errorMessage);
     void clear();
