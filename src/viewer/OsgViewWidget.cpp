@@ -13,7 +13,48 @@
 #include <osgGA/TrackballManipulator>
 
 #include <QFile>
+#include <QDebug>
 #include <QMetaObject>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QSurfaceFormat>
+
+namespace
+{
+QString profileName(QSurfaceFormat::OpenGLContextProfile profile)
+{
+    switch (profile) {
+    case QSurfaceFormat::CoreProfile:
+        return QStringLiteral("Core");
+    case QSurfaceFormat::CompatibilityProfile:
+        return QStringLiteral("Compatibility");
+    case QSurfaceFormat::NoProfile:
+        return QStringLiteral("NoProfile");
+    }
+    return QStringLiteral("Unknown");
+}
+
+QString formatSummary(const QSurfaceFormat& format)
+{
+    return QStringLiteral("OpenGL %1.%2 %3, depth=%4, stencil=%5, samples=%6")
+        .arg(format.majorVersion())
+        .arg(format.minorVersion())
+        .arg(profileName(format.profile()))
+        .arg(format.depthBufferSize())
+        .arg(format.stencilBufferSize())
+        .arg(format.samples());
+}
+
+QString glString(QOpenGLFunctions* functions, GLenum name)
+{
+    if (!functions) {
+        return QStringLiteral("unavailable");
+    }
+    const GLubyte* value = functions->glGetString(name);
+    return value ? QString::fromLatin1(reinterpret_cast<const char*>(value))
+                 : QStringLiteral("unavailable");
+}
+} // namespace
 
 OsgViewWidget::OsgViewWidget(QWidget* parent)
     : osgQOpenGLWidget(parent)
@@ -144,6 +185,16 @@ float OsgViewWidget::pointSize() const
     return m_pointSize;
 }
 
+bool OsgViewWidget::advancedRenderingAvailable() const
+{
+    return m_advancedRenderingAvailable;
+}
+
+QString OsgViewWidget::advancedRenderingStatus() const
+{
+    return m_advancedRenderingStatus;
+}
+
 void OsgViewWidget::setPotreeColorMode(PotreeColorMode mode)
 {
     {
@@ -185,8 +236,80 @@ void OsgViewWidget::initializeViewer()
     viewer->addEventHandler(new osgViewer::StatsHandler);
     viewer->getCamera()->setClearColor(osg::Vec4(0.06f, 0.07f, 0.08f, 1.0f));
     applyPotreeRenderMask();
-    m_root->setUpdateCallback(new PointCloudUpdateCallback(m_runtime.get(), viewer, &m_pointSize));
+    m_fpsTimer.start();
+    m_root->setUpdateCallback(new PointCloudUpdateCallback(
+        m_runtime.get(),
+        viewer,
+        &m_pointSize,
+        [this]() { recordRenderedFrame(); }));
+
+    initializeRenderingCapabilities();
 
     m_initialized = true;
     emit viewerInitialized();
+    emit renderingCapabilitiesChanged(
+        m_advancedRenderingAvailable, m_advancedRenderingStatus);
+}
+
+void OsgViewWidget::initializeRenderingCapabilities()
+{
+    const QSurfaceFormat requestedFormat = QSurfaceFormat::defaultFormat();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (!context) {
+        m_advancedRenderingStatus = tr("No current OpenGL context; using fixed-function Potree rendering.");
+        qWarning().noquote() << m_advancedRenderingStatus;
+        return;
+    }
+
+    const QSurfaceFormat actualFormat = context->format();
+    QOpenGLFunctions* functions = context->functions();
+    qInfo().noquote() << "Requested context:" << formatSummary(requestedFormat);
+    qInfo().noquote() << "Actual context:" << formatSummary(actualFormat);
+    qInfo().noquote() << "GL_VENDOR:" << glString(functions, GL_VENDOR);
+    qInfo().noquote() << "GL_RENDERER:" << glString(functions, GL_RENDERER);
+    qInfo().noquote() << "GL_VERSION:" << glString(functions, GL_VERSION);
+    qInfo().noquote() << "GL_SHADING_LANGUAGE_VERSION:"
+                      << glString(functions, GL_SHADING_LANGUAGE_VERSION);
+
+    const bool versionSupported = actualFormat.majorVersion() > 3
+        || (actualFormat.majorVersion() == 3 && actualFormat.minorVersion() >= 3);
+    const bool compatibilityProfile = actualFormat.profile()
+        == QSurfaceFormat::CompatibilityProfile;
+    if (context->isOpenGLES() || !versionSupported || !compatibilityProfile) {
+        m_advancedRenderingStatus = tr(
+            "OpenGL 3.3 Compatibility is unavailable; using fixed-function Potree rendering.");
+        qWarning().noquote() << m_advancedRenderingStatus;
+        return;
+    }
+
+    QString shaderError;
+    if (!m_sceneManager->initializePotreeShader(&shaderError)) {
+        m_advancedRenderingStatus = tr("Point cloud Shader initialization failed: %1")
+                                        .arg(shaderError);
+        qWarning().noquote() << m_advancedRenderingStatus;
+        return;
+    }
+
+    m_advancedRenderingAvailable = true;
+    m_advancedRenderingStatus = tr("OpenGL 3.3 point cloud Shader enabled.");
+    qInfo().noquote() << m_advancedRenderingStatus;
+}
+
+void OsgViewWidget::recordRenderedFrame()
+{
+    if (!m_fpsTimer.isValid()) {
+        m_fpsTimer.start();
+    }
+
+    ++m_fpsFrameCount;
+    const qint64 elapsedMs = m_fpsTimer.elapsed();
+    if (elapsedMs < 1000) {
+        return;
+    }
+
+    const double fps = static_cast<double>(m_fpsFrameCount) * 1000.0
+        / static_cast<double>(elapsedMs);
+    m_fpsFrameCount = 0;
+    m_fpsTimer.restart();
+    emit fpsChanged(fps);
 }

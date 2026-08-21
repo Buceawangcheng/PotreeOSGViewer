@@ -6,12 +6,12 @@
 int main(int argc, char* argv[])
 {
     QSurfaceFormat format = QSurfaceFormat::defaultFormat();
-    format.setVersion(2, 0);
+    format.setVersion(3, 3);
     format.setProfile(QSurfaceFormat::CompatibilityProfile);
     format.setRenderableType(QSurfaceFormat::OpenGL);
     format.setDepthBufferSize(24);
     format.setStencilBufferSize(8);
-    format.setSamples(4);
+    format.setSamples(0);
     format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     QSurfaceFormat::setDefaultFormat(format);
 

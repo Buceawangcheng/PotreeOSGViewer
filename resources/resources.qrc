@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/">
+        <file>shaders/pointcloud.vert</file>
+        <file>shaders/pointcloud.frag</file>
+        <file>colormaps/turbo.ppm</file>
+        <file>colormaps/lod.ppm</file>
+    </qresource>
+</RCC>

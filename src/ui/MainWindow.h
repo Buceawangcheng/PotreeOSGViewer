@@ -36,6 +36,7 @@ private:
     QAction* m_exitAction = nullptr;
     QLabel* m_fileLabel = nullptr;
     QLabel* m_pointCountLabel = nullptr;
+    QLabel* m_fpsLabel = nullptr;
     QDoubleSpinBox* m_pointSizeSpinBox = nullptr;
     QComboBox* m_colorModeComboBox = nullptr;
     QCheckBox* m_boundsCheckBox = nullptr;

@@ -3,4 +3,5 @@
 enum class PotreeColorMode {
     OriginalRgb,
     LodLevel,
+    Height,
 };

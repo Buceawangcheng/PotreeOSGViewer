@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStatusBar>
+#include <QStandardItemModel>
 #include <QToolBar>
 
 #include <utility>
@@ -47,6 +48,26 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_viewWidget, &OsgViewWidget::pointCloudChanged,
             this, [this](const QString& filePath, quint64 pointCount) {
                 updatePointCloudStatus(filePath, pointCount);
+            });
+    connect(m_viewWidget, &OsgViewWidget::fpsChanged,
+            this, [this](double fps) {
+                m_fpsLabel->setText(tr("FPS: %1").arg(fps, 0, 'f', 1));
+            });
+    connect(m_viewWidget, &OsgViewWidget::renderingCapabilitiesChanged,
+            this, [this](bool available, const QString& status) {
+                const int heightIndex = m_colorModeComboBox->findData(
+                    static_cast<int>(PotreeColorMode::Height));
+                QStandardItemModel* model = qobject_cast<QStandardItemModel*>(
+                    m_colorModeComboBox->model());
+                if (model && heightIndex >= 0) {
+                    model->item(heightIndex)->setEnabled(available);
+                }
+                if (!available
+                    && m_colorModeComboBox->currentData().toInt()
+                        == static_cast<int>(PotreeColorMode::Height)) {
+                    m_colorModeComboBox->setCurrentIndex(0);
+                }
+                statusBar()->showMessage(status, 8000);
             });
 }
 
@@ -108,6 +129,12 @@ void MainWindow::createToolbar()
                                  static_cast<int>(PotreeColorMode::OriginalRgb));
     m_colorModeComboBox->addItem(tr("LOD Level"),
                                  static_cast<int>(PotreeColorMode::LodLevel));
+    m_colorModeComboBox->addItem(tr("Height"),
+                                 static_cast<int>(PotreeColorMode::Height));
+    if (QStandardItemModel* model = qobject_cast<QStandardItemModel*>(
+            m_colorModeComboBox->model())) {
+        model->item(2)->setEnabled(false);
+    }
     toolbar->addWidget(m_colorModeComboBox);
 
     connect(m_colorModeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -128,8 +155,11 @@ void MainWindow::createStatusBar()
 {
     m_fileLabel = new QLabel(tr("No point cloud"), this);
     m_pointCountLabel = new QLabel(tr("Points: 0"), this);
+    m_fpsLabel = new QLabel(tr("FPS: --"), this);
+    m_fpsLabel->setMinimumWidth(fontMetrics().horizontalAdvance(tr("FPS: 000.0")));
 
     statusBar()->addWidget(m_fileLabel, 1);
+    statusBar()->addPermanentWidget(m_fpsLabel);
     statusBar()->addPermanentWidget(m_pointCountLabel);
 }
 

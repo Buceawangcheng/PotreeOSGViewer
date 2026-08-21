@@ -24,6 +24,7 @@ public:
     ~SceneManager();
 
     osg::Group* root() const;
+    bool initializePotreeShader(QString* errorMessage);
 
     bool loadPointCloud(const std::string& nativeFilePath,
                         const QString& displayFilePath,

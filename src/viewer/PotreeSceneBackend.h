@@ -11,16 +11,21 @@
 #include <QString>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
 class PointCloudDataset;
+class PointCloudShaderState;
 struct BoundingBox;
 struct PointCloudNodeData;
 
 class PotreeSceneBackend {
 public:
     explicit PotreeSceneBackend(osg::Group* root);
+    ~PotreeSceneBackend();
+
+    bool initializeShader(QString* errorMessage);
 
     void beginLayer(const PointCloudDataset& dataset, float pointSize);
     bool attachNode(const std::string& nodeId,
@@ -55,6 +60,10 @@ private:
 
     osg::Group* m_root = nullptr;
     osg::ref_ptr<osg::MatrixTransform> m_layerTransform;
+    std::unique_ptr<PointCloudShaderState> m_shaderState;
     std::unordered_map<std::string, NodeVisual> m_nodes;
     PotreeColorMode m_colorMode = PotreeColorMode::OriginalRgb;
+    float m_pointSize = 3.0f;
+    float m_heightMinimum = 0.0f;
+    float m_heightMaximum = 1.0f;
 };

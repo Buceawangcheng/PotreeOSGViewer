@@ -10,11 +10,13 @@
 #include <QDebug>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <vector>
 
 namespace
 {
-OctreeNode* findNodeRecursive(OctreeNode* node, const std::string& nodeId)
+OctreeNode* findNodeByPath(OctreeNode* node, const std::string& nodeId)
 {
     if (!node) {
         return nullptr;
@@ -22,12 +24,25 @@ OctreeNode* findNodeRecursive(OctreeNode* node, const std::string& nodeId)
     if (node->id == nodeId) {
         return node;
     }
-    for (std::unique_ptr<OctreeNode>& child : node->children) {
-        if (OctreeNode* found = findNodeRecursive(child.get(), nodeId)) {
-            return found;
+
+    const std::size_t rootIdLength = node->id.size();
+    if (nodeId.size() <= rootIdLength
+        || nodeId.compare(0, rootIdLength, node->id) != 0) {
+        return nullptr;
+    }
+
+    for (std::size_t index = rootIdLength; index < nodeId.size(); ++index) {
+        const char childCharacter = nodeId[index];
+        if (childCharacter < '0' || childCharacter > '7') {
+            return nullptr;
+        }
+        node = node->children[static_cast<std::size_t>(childCharacter - '0')].get();
+        if (!node) {
+            return nullptr;
         }
     }
-    return nullptr;
+
+    return node->id == nodeId ? node : nullptr;
 }
 
 template<typename Fn>
@@ -46,6 +61,39 @@ double elapsedMs(std::chrono::steady_clock::time_point start,
                  std::chrono::steady_clock::time_point finish)
 {
     return std::chrono::duration<double, std::milli>(finish - start).count();
+}
+
+std::uint64_t scaledPointLimit(std::uint64_t pointBudget, std::uint64_t scale)
+{
+    if (scale == 0) {
+        return 0;
+    }
+    if (pointBudget > std::numeric_limits<std::uint64_t>::max() / scale) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    return pointBudget * scale;
+}
+
+bool matrixNearlyEqual(const osg::Matrixd& lhs, const osg::Matrixd& rhs)
+{
+    constexpr double epsilon = 1e-9;
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            if (std::abs(lhs(row, column) - rhs(row, column)) > epsilon) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool cameraStateNearlyEqual(const CameraState& lhs, const CameraState& rhs)
+{
+    constexpr double epsilon = 1e-9;
+    return lhs.viewportHeight == rhs.viewportHeight
+        && (lhs.position - rhs.position).length2() <= epsilon * epsilon
+        && matrixNearlyEqual(lhs.viewMatrix, rhs.viewMatrix)
+        && matrixNearlyEqual(lhs.projectionMatrix, rhs.projectionMatrix);
 }
 } // namespace
 
@@ -68,10 +116,16 @@ void PointCloudRuntime::openDataset(std::shared_ptr<PointCloudDataset> dataset, 
     m_dataset = std::move(dataset);
     m_frame = 0;
     m_stats = PointCloudRuntimeStats {};
+    rebuildNodeIndex();
+    m_hasLastCameraState = false;
+    m_lastSelection = SelectionResult {};
 
     if (m_dataset) {
         m_settings.maxLevel = m_dataset->hierarchyDepth;
-        m_residentPointLimit = m_settings.pointBudget * 2;
+        m_residentPointTargetLimit = scaledPointLimit(m_settings.pointBudget, 6);
+        m_residentPointLimit = scaledPointLimit(m_settings.pointBudget, 8);
+        m_maxEvictPointsPerFrame = std::max<std::uint64_t>(
+            m_settings.pointBudget / 2, 500000ull);
         m_scheduler.setDataset(m_dataset);
         if (m_sceneManager) {
             m_sceneManager->beginPotreeLayer(*m_dataset, pointSize);
@@ -91,6 +145,9 @@ void PointCloudRuntime::clear()
     m_dataset.reset();
     m_frame = 0;
     m_stats = PointCloudRuntimeStats {};
+    m_nodeIndex.clear();
+    m_hasLastCameraState = false;
+    m_lastSelection = SelectionResult {};
 }
 
 void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
@@ -101,30 +158,54 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
 
     ++m_frame;
     const auto drainStart = Clock::now();
-    applyCompletedResults();
+    const bool hierarchyChanged = applyCompletedResults();
     const auto drainFinish = Clock::now();
+
+    const CameraState currentCamera = cameraState(viewer);
+    if (!hierarchyChanged
+        && m_hasLastCameraState
+        && cameraStateNearlyEqual(currentCamera, m_lastCameraState)
+        && !m_lastSelection.selectedNodes.empty()) {
+        const auto attachStart = Clock::now();
+        attachSelectedCpuReadyNodes(m_lastSelection, pointSize, false);
+        const auto attachFinish = Clock::now();
+
+        m_stats.drainMs = elapsedMs(drainStart, drainFinish);
+        m_stats.selectionMs = 0.0;
+        m_stats.attachMs = elapsedMs(attachStart, attachFinish);
+        m_stats.evictMs = 0.0;
+        m_stats.queuedNodeCount = m_scheduler.queuedCount();
+        m_stats.loadingNodeCount = m_scheduler.loadingCount();
+        return;
+    }
 
     const auto selectionStart = Clock::now();
     const SelectionResult selection = m_selector.select(*m_dataset->root,
-                                                        cameraState(viewer),
+                                                        currentCamera,
                                                         m_settings);
     const auto selectionFinish = Clock::now();
+    m_lastCameraState = currentCamera;
+    m_hasLastCameraState = true;
+    m_lastSelection = selection;
 
     applySelection(selection);
 
     const auto attachStart = Clock::now();
-    attachSelectedCpuReadyNodes(selection, pointSize);
+    attachSelectedCpuReadyNodes(selection, pointSize, true);
     const auto attachFinish = Clock::now();
 
     scheduleSelectedNodes(selection);
+    const auto evictStart = Clock::now();
     evictUnusedNodes();
+    const auto evictFinish = Clock::now();
     refreshStats(selection);
 
     m_stats.drainMs = elapsedMs(drainStart, drainFinish);
     m_stats.selectionMs = elapsedMs(selectionStart, selectionFinish);
     m_stats.attachMs = elapsedMs(attachStart, attachFinish);
+    m_stats.evictMs = elapsedMs(evictStart, evictFinish);
 
-    if ((m_frame % 60) == 0) {
+    /*if ((m_frame % 60) == 0)*/ {
         qInfo().nospace()
             << "LOD selected=" << m_stats.selectedNodeCount
             << " resident=" << m_stats.residentNodeCount
@@ -137,7 +218,14 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
             << " selectMs=" << m_stats.selectionMs
             << " drainMs=" << m_stats.drainMs
             << " hierarchyMs=" << m_stats.hierarchyApplyMs
-            << " attachMs=" << m_stats.attachMs;
+            << " hierarchyNodes=" << m_stats.hierarchyNodeCount
+            << " hierarchyIndexMs=" << m_stats.hierarchyIndexMs
+            << " attachMs=" << m_stats.attachMs
+            << " attached=" << m_stats.attachedNodeCount
+            << "/" << m_stats.attachedPointCount
+            << " evictMs=" << m_stats.evictMs
+            << " evicted=" << m_stats.evictedNodeCount
+            << "/" << m_stats.evictedPointCount;
     }
 }
 
@@ -169,11 +257,14 @@ CameraState PointCloudRuntime::cameraState(osgViewer::Viewer* viewer) const
     return state;
 }
 
-void PointCloudRuntime::applyCompletedResults()
+bool PointCloudRuntime::applyCompletedResults()
 {
     const std::vector<NodeLoadResult> completed = m_scheduler.drainCompleted();
     Potree2Provider provider;
     double hierarchyMs = 0.0;
+    double hierarchyIndexMs = 0.0;
+    std::size_t hierarchyNodeCount = 0;
+    bool hierarchyChanged = false;
 
     for (const NodeLoadResult& result : completed) {
         if (result.datasetGeneration != m_generation) {
@@ -196,6 +287,7 @@ void PointCloudRuntime::applyCompletedResults()
         }
 
         if (!result.hierarchyPatch.nodes.empty()) {
+            hierarchyNodeCount += result.hierarchyPatch.nodes.size();
             const auto start = Clock::now();
             QString error;
             if (!provider.applyHierarchyPatch(m_dataset.get(), result.hierarchyPatch, &error)) {
@@ -203,6 +295,16 @@ void PointCloudRuntime::applyCompletedResults()
                 continue;
             }
             hierarchyMs += elapsedMs(start, Clock::now());
+
+            const auto indexStart = Clock::now();
+            for (const HierarchyNodePatch& nodePatch : result.hierarchyPatch.nodes) {
+                if (OctreeNode* patchedNode = findNodeByPath(
+                        m_dataset->root.get(), nodePatch.id)) {
+                    m_nodeIndex[nodePatch.id] = patchedNode;
+                }
+            }
+            hierarchyIndexMs += elapsedMs(indexStart, Clock::now());
+            hierarchyChanged = true;
             node = findNode(result.nodeId);
             if (!node || node->requestGeneration != result.requestGeneration) {
                 continue;
@@ -220,6 +322,9 @@ void PointCloudRuntime::applyCompletedResults()
     }
 
     m_stats.hierarchyApplyMs = hierarchyMs;
+    m_stats.hierarchyIndexMs = hierarchyIndexMs;
+    m_stats.hierarchyNodeCount = hierarchyNodeCount;
+    return hierarchyChanged;
 }
 
 void PointCloudRuntime::applySelection(const SelectionResult& selection)
@@ -249,15 +354,22 @@ void PointCloudRuntime::applySelection(const SelectionResult& selection)
     });
 }
 
-void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selection, float pointSize)
+void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selection,
+                                                   float pointSize,
+                                                   bool trustSelectionState)
 {
     std::size_t attachedNodes = 0;
     std::uint64_t attachedBytes = 0;
+    m_stats.attachedNodeCount = 0;
+    m_stats.attachedPointCount = 0;
 
     for (const NodeSelection& selected : selection.selectedNodes) {
         if (attachedNodes >= m_maxAttachNodesPerFrame
             || attachedBytes >= m_maxAttachBytesPerFrame) {
             break;
+        }
+        if (selected.resident || (trustSelectionState && !selected.cpuReady)) {
+            continue;
         }
 
         OctreeNode* node = findNode(selected.nodeId);
@@ -295,6 +407,8 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
         node->cpuBytes = 0;
         ++attachedNodes;
         attachedBytes += bytes;
+        ++m_stats.attachedNodeCount;
+        m_stats.attachedPointCount += node->pointCount;
     }
 }
 
@@ -329,6 +443,9 @@ void PointCloudRuntime::scheduleSelectedNodes(const SelectionResult& selection)
 
 void PointCloudRuntime::evictUnusedNodes()
 {
+    m_stats.evictedNodeCount = 0;
+    m_stats.evictedPointCount = 0;
+
     std::uint64_t residentPoints = 0;
     std::vector<OctreeNode*> residentNodes;
     visitNodes(m_dataset->root.get(), [&residentPoints, &residentNodes](OctreeNode& node) {
@@ -342,12 +459,19 @@ void PointCloudRuntime::evictUnusedNodes()
         return;
     }
 
+    const std::uint64_t hardResidentPointLimit = scaledPointLimit(m_settings.pointBudget, 12);
+    std::size_t evictedNodesThisFrame = 0;
+    std::uint64_t evictedPointsThisFrame = 0;
+
     std::sort(residentNodes.begin(), residentNodes.end(), [](const OctreeNode* lhs, const OctreeNode* rhs) {
         return lhs->lastAccessFrame < rhs->lastAccessFrame;
     });
 
     for (OctreeNode* node : residentNodes) {
-        if (residentPoints <= m_residentPointLimit) {
+        if (residentPoints <= m_residentPointTargetLimit
+            || evictedNodesThisFrame >= m_maxEvictNodesPerFrame
+            || (evictedNodesThisFrame > 0
+                && evictedPointsThisFrame >= m_maxEvictPointsPerFrame)) {
             break;
         }
         if (node == m_dataset->root.get()
@@ -357,10 +481,20 @@ void PointCloudRuntime::evictUnusedNodes()
             continue;
         }
 
+        const bool recentlyVisible = node->lastVisibleFrame > 0
+            && m_frame - node->lastVisibleFrame < m_minResidentFramesBeforeEvict;
+        if (recentlyVisible && residentPoints <= hardResidentPointLimit) {
+            continue;
+        }
+
         if (m_sceneManager) {
             m_sceneManager->removePotreeNode(node->id);
         }
         residentPoints -= node->pointCount;
+        ++evictedNodesThisFrame;
+        evictedPointsThisFrame += node->pointCount;
+        ++m_stats.evictedNodeCount;
+        m_stats.evictedPointCount += node->pointCount;
         node->gpuState = GpuState::Detached;
         node->pointDataState = PointDataState::Unloaded;
         node->gpuBytes = 0;
@@ -396,9 +530,25 @@ void PointCloudRuntime::refreshStats(const SelectionResult& selection)
     });
 }
 
+void PointCloudRuntime::rebuildNodeIndex()
+{
+    m_nodeIndex.clear();
+    if (!m_dataset || !m_dataset->root) {
+        return;
+    }
+
+    visitNodes(m_dataset->root.get(), [this](OctreeNode& node) {
+        m_nodeIndex[node.id] = &node;
+    });
+}
+
 OctreeNode* PointCloudRuntime::findNode(const std::string& nodeId) const
 {
-    return m_dataset ? findNodeRecursive(m_dataset->root.get(), nodeId) : nullptr;
+    const auto indexed = m_nodeIndex.find(nodeId);
+    if (indexed != m_nodeIndex.end()) {
+        return indexed->second;
+    }
+    return m_dataset ? findNodeByPath(m_dataset->root.get(), nodeId) : nullptr;
 }
 
 NodeLoadRequest PointCloudRuntime::makeRequest(const OctreeNode& node,

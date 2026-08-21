@@ -96,6 +96,7 @@ set_target_properties(osgQOpenGL::osgQOpenGL PROPERTIES
 )
 
 add_executable(PotreeOSGViewer
+    resources/resources.qrc
     src/main.cpp
     src/pointcloud/BoundingBox.h
     src/pointcloud/CameraState.h
@@ -124,6 +125,8 @@ add_executable(PotreeOSGViewer
     src/viewer/OsgViewWidget.cpp
     src/viewer/OsgViewWidget.h
     src/viewer/PotreeColorMode.h
+    src/viewer/PointCloudShaderState.cpp
+    src/viewer/PointCloudShaderState.h
     src/viewer/PotreeRenderMasks.h
     src/viewer/PotreeSceneBackend.cpp
     src/viewer/PotreeSceneBackend.h
@@ -151,6 +154,7 @@ include(CTest)
 
 if(BUILD_TESTING)
     add_executable(PotreePointCloudTests
+        resources/resources.qrc
         tests/PointCloudTests.cpp
         src/pointcloud/BoundingBox.h
         src/pointcloud/CameraState.h
@@ -172,6 +176,8 @@ if(BUILD_TESTING)
         src/viewer/SceneManager.cpp
         src/viewer/SceneManager.h
         src/viewer/PotreeColorMode.h
+        src/viewer/PointCloudShaderState.cpp
+        src/viewer/PointCloudShaderState.h
         src/viewer/PotreeRenderMasks.h
         src/viewer/PotreeSceneBackend.cpp
         src/viewer/PotreeSceneBackend.h
@@ -179,6 +185,7 @@ if(BUILD_TESTING)
 
     target_link_libraries(PotreePointCloudTests PRIVATE
         Qt5::Core
+        Qt5::Gui
         unofficial::osg::osg
         unofficial::osg::osgDB
     )

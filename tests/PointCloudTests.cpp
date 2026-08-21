@@ -16,6 +16,7 @@
 
 #include <osg/Geode>
 #include <osg/Geometry>
+#include <osg/Program>
 #include <osg/observer_ptr>
 
 #include <cmath>
@@ -265,6 +266,22 @@ const osg::Vec4ubArray* potreeNodeColors(SceneManager& scene,
     return geometry
         ? dynamic_cast<const osg::Vec4ubArray*>(geometry->getColorArray())
         : nullptr;
+}
+
+osg::StateSet* potreeNodePointState(SceneManager& scene,
+                                    unsigned int layerChildIndex)
+{
+    if (scene.root()->getNumChildren() == 0) {
+        return nullptr;
+    }
+    osg::Group* layer = scene.root()->getChild(0)->asGroup();
+    osg::Group* nodeTransform = layer && layerChildIndex < layer->getNumChildren()
+        ? layer->getChild(layerChildIndex)->asGroup()
+        : nullptr;
+    osg::Geode* geode = nodeTransform && nodeTransform->getNumChildren() > 0
+        ? dynamic_cast<osg::Geode*>(nodeTransform->getChild(0))
+        : nullptr;
+    return geode ? geode->getStateSet() : nullptr;
 }
 
 void testValidDefaultDataset()
@@ -781,6 +798,8 @@ void testPotreeSceneMultipleNodes()
     shifted.origin += osg::Vec3d(1.0, 0.0, 0.0);
 
     SceneManager scene;
+    expect(scene.initializePotreeShader(&error),
+           "embedded point Shader resources should initialize");
     scene.beginPotreeLayer(*dataset, 3.0f);
     const osg::BoundingSphere initialBound = scene.root()->getBound();
     const osg::Vec3d expectedCenter = (dataset->bounds.min + dataset->bounds.max) * 0.5;
@@ -808,12 +827,27 @@ void testPotreeSceneMultipleNodes()
                && firstNode->getChild(1)->getNodeMask() == PotreeRenderMasks::BoundingBoxes,
            "point and bounding-box children should use independent cull-mask bits");
 
+    osg::Geode* pointGeode = firstNode && firstNode->getNumChildren() > 0
+        ? dynamic_cast<osg::Geode*>(firstNode->getChild(0))
+        : nullptr;
+    osg::StateSet* pointStateSet = pointGeode ? pointGeode->getStateSet() : nullptr;
+    const osg::Program* pointProgram = pointStateSet
+        ? dynamic_cast<const osg::Program*>(
+              pointStateSet->getAttribute(osg::StateAttribute::PROGRAM))
+        : nullptr;
+    expect(pointProgram && pointProgram->getNumShaders() == 2,
+           "PointGeode should use the embedded vertex and fragment Shader program");
+
     osg::Geode* boundsGeode = firstNode && firstNode->getNumChildren() > 1
         ? dynamic_cast<osg::Geode*>(firstNode->getChild(1))
         : nullptr;
     osg::Geometry* boundsGeometry = boundsGeode && boundsGeode->getNumDrawables() > 0
         ? dynamic_cast<osg::Geometry*>(boundsGeode->getDrawable(0))
         : nullptr;
+    const osg::StateSet* boundsStateSet = boundsGeode ? boundsGeode->getStateSet() : nullptr;
+    expect(!boundsStateSet
+               || !boundsStateSet->getAttribute(osg::StateAttribute::PROGRAM),
+           "BoundingBoxGeode should not inherit the point Shader program");
     expect(boundsGeometry
                && boundsGeometry->getVertexArray()->getNumElements() == 8
                && boundsGeometry->getNumPrimitiveSets() == 1
@@ -827,16 +861,54 @@ void testPotreeSceneMultipleNodes()
     scene.setPotreeColorMode(PotreeColorMode::LodLevel);
     const osg::Vec4ubArray* level0Colors = potreeNodeColors(scene, 1);
     const osg::Vec4ubArray* level1Colors = potreeNodeColors(scene, 2);
-    expect(level0Colors && level0Colors->at(0) == level0Colors->at(1),
-           "LOD coloring should use one color for every point in a node");
-    expect(level1Colors && level0Colors
-               && level1Colors->at(0) != level0Colors->at(0),
-           "adjacent LOD levels should use different colors");
+    expect(level0Colors == colors && level1Colors,
+           "Shader color mode changes should keep the original Geometry color array");
+
+    osg::StateSet* firstPointState = potreeNodePointState(scene, 1);
+    osg::StateSet* secondPointState = potreeNodePointState(scene, 2);
+    osg::Uniform* firstColorMode = firstPointState
+        ? firstPointState->getUniform("uColorMode")
+        : nullptr;
+    osg::Uniform* secondColorMode = secondPointState
+        ? secondPointState->getUniform("uColorMode")
+        : nullptr;
+    int colorMode = -1;
+    expect(firstColorMode && firstColorMode == secondColorMode
+               && firstColorMode->get(colorMode)
+               && colorMode == static_cast<int>(PotreeColorMode::LodLevel),
+           "all PointGeodes should share the LOD color mode uniform");
+
+    int firstLevel = -1;
+    int secondLevel = -1;
+    osg::Uniform* firstLevelUniform = firstPointState
+        ? firstPointState->getUniform("uLodLevel")
+        : nullptr;
+    osg::Uniform* secondLevelUniform = secondPointState
+        ? secondPointState->getUniform("uLodLevel")
+        : nullptr;
+    expect(firstLevelUniform && secondLevelUniform
+               && firstLevelUniform->get(firstLevel)
+               && secondLevelUniform->get(secondLevel)
+               && firstLevel == 0 && secondLevel == 1,
+           "each PointGeode should retain its own LOD level uniform");
+
+    scene.setPotreeColorMode(PotreeColorMode::Height);
+    expect(firstColorMode->get(colorMode)
+               && colorMode == static_cast<int>(PotreeColorMode::Height),
+           "Height mode should update the shared color mode uniform");
+    scene.setPointSize(7.0f);
+    osg::Uniform* pointSizeUniform = firstPointState
+        ? firstPointState->getUniform("uPointSize")
+        : nullptr;
+    float shaderPointSize = 0.0f;
+    expect(pointSizeUniform && pointSizeUniform->get(shaderPointSize)
+               && near(shaderPointSize, 7.0f),
+           "point size should update the shared Shader uniform");
 
     scene.setPotreeColorMode(PotreeColorMode::OriginalRgb);
     colors = potreeNodeColors(scene, 1);
     expect(colors && colors->at(0) != colors->at(1),
-           "switching back should restore decoded RGB colors");
+           "switching back should keep decoded RGB colors attached");
 
     scene.setPotreeNodeVisible("r1", false);
     expect(scene.pointCount() == 4,

@@ -293,13 +293,24 @@ OctreeNode* findNode(OctreeNode* node, const std::string& id)
         return node;
     }
 
-    for (std::unique_ptr<OctreeNode>& child : node->children) {
-        if (OctreeNode* found = findNode(child.get(), id)) {
-            return found;
+    const std::size_t rootIdLength = node->id.size();
+    if (id.size() <= rootIdLength
+        || id.compare(0, rootIdLength, node->id) != 0) {
+        return nullptr;
+    }
+
+    for (std::size_t index = rootIdLength; index < id.size(); ++index) {
+        const char childCharacter = id[index];
+        if (childCharacter < '0' || childCharacter > '7') {
+            return nullptr;
+        }
+        node = node->children[static_cast<std::size_t>(childCharacter - '0')].get();
+        if (!node) {
+            return nullptr;
         }
     }
 
-    return nullptr;
+    return node->id == id ? node : nullptr;
 }
 
 const OctreeNode* findNode(const OctreeNode* node, const std::string& id)
@@ -842,6 +853,7 @@ bool Potree2Provider::applyHierarchyPatch(PointCloudDataset* dataset,
         return false;
     }
 
+    std::uint32_t patchMaxLevel = dataset->maxLoadedLevel;
     for (const HierarchyNodePatch& nodePatch : patch.nodes) {
         OctreeNode* node = findNode(dataset->root.get(), nodePatch.id);
         if (!node) {
@@ -880,10 +892,11 @@ bool Potree2Provider::applyHierarchyPatch(PointCloudDataset* dataset,
         }
 
         applyNodePatch(nodePatch, node);
+        patchMaxLevel = std::max(patchMaxLevel, nodePatch.level);
     }
 
     dataset->hierarchyRecordsLoaded += patch.nodes.size();
-    dataset->maxLoadedLevel = maxLoadedLevel(*dataset->root);
+    dataset->maxLoadedLevel = patchMaxLevel;
     return true;
 }
 

@@ -66,6 +66,11 @@ osg::Group* SceneManager::root() const
     return m_root.get();
 }
 
+bool SceneManager::initializePotreeShader(QString* errorMessage)
+{
+    return m_potreeBackend->initializeShader(errorMessage);
+}
+
 bool SceneManager::loadPointCloud(const std::string& nativeFilePath,
                                   const QString& displayFilePath,
                                   float pointSize,
@@ -199,6 +204,8 @@ void SceneManager::applyPointCloudState(osg::Node* node, float pointSize)
     osg::StateSet* stateSet = node->getOrCreateStateSet();
     stateSet->setMode(GL_LIGHTING,
                       osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+    stateSet->setMode(GL_POINT_SMOOTH,
+                      osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
     stateSet->setAttributeAndModes(new osg::Point(pointSize),
                                    osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 }

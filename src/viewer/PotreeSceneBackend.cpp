@@ -4,6 +4,7 @@
 #include "pointcloud/PointCloudDataset.h"
 #include "pointcloud/PointCloudNodeData.h"
 #include "viewer/PotreeRenderMasks.h"
+#include "viewer/PointCloudShaderState.h"
 
 #include <osg/Array>
 #include <osg/BoundingSphere>
@@ -30,6 +31,8 @@ void applyPointState(osg::Node* node, float pointSize)
     osg::StateSet* stateSet = node->getOrCreateStateSet();
     stateSet->setMode(GL_LIGHTING,
                       osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+    stateSet->setMode(GL_POINT_SMOOTH,
+                      osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
     stateSet->setAttributeAndModes(new osg::Point(pointSize),
                                    osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 }
@@ -96,12 +99,33 @@ osg::ref_ptr<osg::Geode> createBoundingBoxGeode(const BoundingBox& bounds,
 
 PotreeSceneBackend::PotreeSceneBackend(osg::Group* root)
     : m_root(root)
+    , m_shaderState(std::make_unique<PointCloudShaderState>())
 {
+}
+
+PotreeSceneBackend::~PotreeSceneBackend() = default;
+
+bool PotreeSceneBackend::initializeShader(QString* errorMessage)
+{
+    if (!m_shaderState->initialize(errorMessage)) {
+        return false;
+    }
+    m_shaderState->setColorMode(m_colorMode);
+    m_shaderState->setPointSize(m_pointSize);
+    m_shaderState->setHeightRange(m_heightMinimum, m_heightMaximum);
+    return true;
 }
 
 void PotreeSceneBackend::beginLayer(const PointCloudDataset& dataset, float pointSize)
 {
     clear();
+    m_pointSize = pointSize;
+    m_heightMinimum = static_cast<float>(dataset.bounds.min.z());
+    m_heightMaximum = static_cast<float>(dataset.bounds.max.z());
+    if (m_shaderState->isInitialized()) {
+        m_shaderState->setPointSize(m_pointSize);
+        m_shaderState->setHeightRange(m_heightMinimum, m_heightMaximum);
+    }
     m_layerTransform = new osg::MatrixTransform;
     m_layerTransform->setMatrix(osg::Matrixd::translate(dataset.offset));
 
@@ -164,7 +188,9 @@ bool PotreeSceneBackend::attachNode(const std::string& nodeId,
     geometry->setUseVertexBufferObjects(true);
     geometry->setVertexArray(vertices.get());
     geometry->setColorArray(
-        m_colorMode == PotreeColorMode::LodLevel ? levelColors.get() : originalColors.get(),
+        !m_shaderState->isInitialized() && m_colorMode == PotreeColorMode::LodLevel
+            ? levelColors.get()
+            : originalColors.get(),
         osg::Array::BIND_PER_VERTEX);
     geometry->addPrimitiveSet(new osg::DrawArrays(
         GL_POINTS,
@@ -175,6 +201,9 @@ bool PotreeSceneBackend::attachNode(const std::string& nodeId,
     geode->setName(nodeId + ":points");
     geode->setNodeMask(PotreeRenderMasks::Points);
     geode->addDrawable(geometry.get());
+    if (m_shaderState->isInitialized()) {
+        m_shaderState->applyTo(geode->getOrCreateStateSet(), level, data.origin.z());
+    }
 
     osg::ref_ptr<osg::Geode> boundingBoxGeode = createBoundingBoxGeode(
         bounds, data.origin, level);
@@ -235,6 +264,10 @@ void PotreeSceneBackend::clear()
 
 void PotreeSceneBackend::setPointSize(float pointSize)
 {
+    m_pointSize = pointSize;
+    if (m_shaderState->isInitialized()) {
+        m_shaderState->setPointSize(pointSize);
+    }
     applyPointState(m_layerTransform.get(), pointSize);
     for (auto& entry : m_nodes) {
         applyPointState(entry.second.transform.get(), pointSize);
@@ -248,6 +281,10 @@ void PotreeSceneBackend::setColorMode(PotreeColorMode mode)
     }
 
     m_colorMode = mode;
+    if (m_shaderState->isInitialized()) {
+        m_shaderState->setColorMode(mode);
+        return;
+    }
     for (auto& entry : m_nodes) {
         applyColorMode(entry.second);
     }

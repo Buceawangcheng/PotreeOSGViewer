@@ -6,6 +6,7 @@
 #include <osg/ref_ptr>
 #include <osgQOpenGL/osgQOpenGLWidget>
 
+#include <QElapsedTimer>
 #include <QString>
 
 #include <memory>
@@ -33,21 +34,31 @@ public:
 
     void setPointSize(float pointSize);
     float pointSize() const;
+    bool advancedRenderingAvailable() const;
+    QString advancedRenderingStatus() const;
     void setPotreeColorMode(PotreeColorMode mode);
     void setPotreeBoundingBoxesVisible(bool visible);
 
 signals:
     void pointCloudChanged(const QString& filePath, quint64 pointCount);
+    void fpsChanged(double fps);
     void viewerInitialized();
+    void renderingCapabilitiesChanged(bool available, const QString& status);
 
 private:
     void initializeViewer();
+    void initializeRenderingCapabilities();
     void applyPotreeRenderMask();
+    void recordRenderedFrame();
 
     std::unique_ptr<SceneManager> m_sceneManager;
     std::unique_ptr<PointCloudRuntime> m_runtime;
     osg::ref_ptr<osg::Group> m_root;
     bool m_initialized = false;
     bool m_showPotreeBoundingBoxes = false;
+    bool m_advancedRenderingAvailable = false;
+    QString m_advancedRenderingStatus;
+    QElapsedTimer m_fpsTimer;
+    int m_fpsFrameCount = 0;
     float m_pointSize = 3.0f;
 };
