@@ -124,6 +124,14 @@ add_executable(PotreeOSGViewer
     src/ui/MainWindow.h
     src/viewer/OsgViewWidget.cpp
     src/viewer/OsgViewWidget.h
+    src/viewer/camera/CameraMath.cpp
+    src/viewer/camera/CameraMath.h
+    src/viewer/camera/CesiumCameraManipulator.cpp
+    src/viewer/camera/CesiumCameraManipulator.h
+    src/viewer/camera/DepthBufferPicker.cpp
+    src/viewer/camera/DepthBufferPicker.h
+    src/viewer/camera/PickDebugVisualizer.cpp
+    src/viewer/camera/PickDebugVisualizer.h
     src/viewer/PotreeColorMode.h
     src/viewer/PointCloudShaderState.cpp
     src/viewer/PointCloudShaderState.h
@@ -175,6 +183,14 @@ if(BUILD_TESTING)
         src/pointcloud/Potree2Provider.h
         src/viewer/SceneManager.cpp
         src/viewer/SceneManager.h
+        src/viewer/camera/CameraMath.cpp
+        src/viewer/camera/CameraMath.h
+        src/viewer/camera/CesiumCameraManipulator.cpp
+        src/viewer/camera/CesiumCameraManipulator.h
+        src/viewer/camera/DepthBufferPicker.cpp
+        src/viewer/camera/DepthBufferPicker.h
+        src/viewer/camera/PickDebugVisualizer.cpp
+        src/viewer/camera/PickDebugVisualizer.h
         src/viewer/PotreeColorMode.h
         src/viewer/PointCloudShaderState.cpp
         src/viewer/PointCloudShaderState.h
@@ -188,6 +204,7 @@ if(BUILD_TESTING)
         Qt5::Gui
         unofficial::osg::osg
         unofficial::osg::osgDB
+        unofficial::osg::osgGA
     )
 
     target_include_directories(PotreePointCloudTests PRIVATE

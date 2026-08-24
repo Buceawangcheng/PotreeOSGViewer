@@ -3,9 +3,15 @@
 #include "pointcloud/Potree2Provider.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
+
+namespace
+{
+constexpr std::size_t PersistentWorkerCount = 4;
+}
 
 struct NodeLoadScheduler::State {
     struct PendingLess {
@@ -19,6 +25,7 @@ struct NodeLoadScheduler::State {
     };
 
     mutable std::mutex mutex;
+    std::condition_variable condition;
     std::shared_ptr<PointCloudDataset> dataset;
     std::priority_queue<NodeLoadRequest, std::vector<NodeLoadRequest>, PendingLess> pending;
     std::vector<NodeLoadResult> completed;
@@ -31,16 +38,29 @@ struct NodeLoadScheduler::State {
 NodeLoadScheduler::NodeLoadScheduler()
     : m_state(std::make_shared<State>())
 {
+    m_workers.reserve(PersistentWorkerCount);
+    for (std::size_t index = 0; index < PersistentWorkerCount; ++index) {
+        m_workers.emplace_back(&NodeLoadScheduler::workerLoop, m_state);
+    }
 }
 
 NodeLoadScheduler::~NodeLoadScheduler()
 {
-    std::lock_guard<std::mutex> lock(m_state->mutex);
-    m_state->shutdown = true;
-    while (!m_state->pending.empty()) {
-        m_state->pending.pop();
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        m_state->shutdown = true;
+        m_state->completionCallback = {};
+        while (!m_state->pending.empty()) {
+            m_state->pending.pop();
+        }
+        m_state->dataset.reset();
     }
-    m_state->dataset.reset();
+    m_state->condition.notify_all();
+    for (std::thread& worker : m_workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
 }
 
 void NodeLoadScheduler::setDataset(std::shared_ptr<PointCloudDataset> dataset)
@@ -53,7 +73,7 @@ void NodeLoadScheduler::setDataset(std::shared_ptr<PointCloudDataset> dataset)
         }
         m_state->completed.clear();
     }
-    dispatch(m_state);
+    m_state->condition.notify_all();
 }
 
 void NodeLoadScheduler::clear()
@@ -67,7 +87,7 @@ void NodeLoadScheduler::setMaxConcurrentLoads(std::size_t maxConcurrentLoads)
         std::lock_guard<std::mutex> lock(m_state->mutex);
         m_state->maxConcurrentLoads = std::max<std::size_t>(1, maxConcurrentLoads);
     }
-    dispatch(m_state);
+    m_state->condition.notify_all();
 }
 
 void NodeLoadScheduler::setCompletionCallback(std::function<void()> callback)
@@ -85,7 +105,7 @@ void NodeLoadScheduler::schedule(NodeLoadRequest request)
         }
         m_state->pending.push(std::move(request));
     }
-    dispatch(m_state);
+    m_state->condition.notify_all();
 }
 
 std::vector<NodeLoadResult> NodeLoadScheduler::drainCompleted()
@@ -108,58 +128,49 @@ std::size_t NodeLoadScheduler::queuedCount() const
     return m_state->pending.size();
 }
 
-void NodeLoadScheduler::dispatch(const std::shared_ptr<State>& state)
+std::size_t NodeLoadScheduler::outstandingCount() const
 {
-    std::vector<NodeLoadRequest> requests;
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        while (!state->shutdown
-               && state->dataset
-               && state->loading < state->maxConcurrentLoads
-               && !state->pending.empty()) {
-            requests.push_back(state->pending.top());
-            state->pending.pop();
-            ++state->loading;
-        }
-    }
-
-    for (NodeLoadRequest& request : requests) {
-        std::thread(&NodeLoadScheduler::runRequest, state, std::move(request)).detach();
-    }
+    std::lock_guard<std::mutex> lock(m_state->mutex);
+    return m_state->pending.size() + m_state->loading;
 }
 
-void NodeLoadScheduler::runRequest(const std::shared_ptr<State>& state,
-                                   NodeLoadRequest request)
+void NodeLoadScheduler::workerLoop(const std::shared_ptr<State>& state)
 {
-    std::shared_ptr<PointCloudDataset> dataset;
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        dataset = state->dataset;
-    }
+    for (;;) {
+        NodeLoadRequest request;
+        std::shared_ptr<PointCloudDataset> dataset;
+        {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            state->condition.wait(lock, [&]() {
+                return state->shutdown
+                    || (state->dataset
+                        && !state->pending.empty()
+                        && state->loading < state->maxConcurrentLoads);
+            });
+            if (state->shutdown) {
+                return;
+            }
 
-    NodeLoadResult result;
-    if (dataset) {
-        Potree2Provider provider;
-        result = provider.ensureNodeReady(*dataset, request);
-    } else {
-        result.datasetGeneration = request.datasetGeneration;
-        result.nodeId = request.nodeId;
-        result.requestGeneration = request.requestGeneration;
-        result.error = QStringLiteral("Point cloud dataset is no longer available.");
-    }
-
-    std::function<void()> callback;
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->completed.push_back(std::move(result));
-        if (state->loading > 0) {
-            --state->loading;
+            request = state->pending.top();
+            state->pending.pop();
+            dataset = state->dataset;
+            ++state->loading;
         }
-        callback = state->completionCallback;
-    }
 
-    if (callback) {
-        callback();
+        Potree2Provider provider;
+        NodeLoadResult result = provider.ensureNodeReady(*dataset, request);
+
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->completed.push_back(std::move(result));
+            --state->loading;
+            callback = state->completionCallback;
+        }
+
+        if (callback) {
+            callback();
+        }
+        state->condition.notify_all();
     }
-    dispatch(state);
 }

@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
 class NodeLoadScheduler {
@@ -22,13 +23,13 @@ public:
     std::vector<NodeLoadResult> drainCompleted();
     std::size_t loadingCount() const;
     std::size_t queuedCount() const;
+    std::size_t outstandingCount() const;
 
 private:
     struct State;
 
-    static void dispatch(const std::shared_ptr<State>& state);
-    static void runRequest(const std::shared_ptr<State>& state,
-                           NodeLoadRequest request);
+    static void workerLoop(const std::shared_ptr<State>& state);
 
     std::shared_ptr<State> m_state;
+    std::vector<std::thread> m_workers;
 };

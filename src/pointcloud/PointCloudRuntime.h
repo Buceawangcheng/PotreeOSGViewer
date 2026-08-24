@@ -82,6 +82,7 @@ private:
     std::unordered_map<std::string, OctreeNode*> m_nodeIndex;
     CameraState m_lastCameraState;
     SelectionResult m_lastSelection;
+    Clock::time_point m_lastSlowUpdateLog;
     std::uint64_t m_generation = 0;
     std::uint64_t m_frame = 0;
     bool m_hasLastCameraState = false;
@@ -89,6 +90,7 @@ private:
     std::uint64_t m_residentPointTargetLimit = 6000000;
     std::size_t m_maxAttachNodesPerFrame = 2;
     std::uint64_t m_maxAttachBytesPerFrame = 32ull * 1024ull * 1024ull;
+    std::size_t m_maxOutstandingLoads = 4;
     std::size_t m_maxEvictNodesPerFrame = 4;
     std::uint64_t m_maxEvictPointsPerFrame = 500000;
     std::uint64_t m_minResidentFramesBeforeEvict = 180;

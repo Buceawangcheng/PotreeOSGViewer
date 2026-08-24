@@ -4,6 +4,7 @@
 #include "viewer/OsgViewWidget.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
@@ -87,6 +88,53 @@ void MainWindow::createActions()
     m_exitAction = new QAction(tr("E&xit"), this);
     m_exitAction->setShortcut(QKeySequence::Quit);
     connect(m_exitAction, &QAction::triggered, this, &QWidget::close);
+
+    m_pickDebugAction = new QAction(tr("显示拾取位置"), this);
+    m_pickDebugAction->setCheckable(true);
+    m_pickDebugAction->setChecked(false);
+    connect(m_pickDebugAction, &QAction::toggled,
+            m_viewWidget, &OsgViewWidget::setPickDebugVisible);
+
+    QActionGroup* cameraGroup = new QActionGroup(this);
+    cameraGroup->setExclusive(true);
+
+    m_defaultCameraAction = new QAction(
+        tr("OSG default Trackball camera"), this);
+    m_defaultCameraAction->setCheckable(true);
+    cameraGroup->addAction(m_defaultCameraAction);
+    connect(m_defaultCameraAction, &QAction::triggered,
+            this, [this](bool checked) {
+                if (checked) {
+                    m_viewWidget->setUseCesiumCamera(false);
+                }
+            });
+
+    m_cesiumCameraAction = new QAction(tr("Cesium camera"), this);
+    m_cesiumCameraAction->setCheckable(true);
+    m_cesiumCameraAction->setChecked(true);
+    cameraGroup->addAction(m_cesiumCameraAction);
+    connect(m_cesiumCameraAction, &QAction::triggered,
+            this, [this](bool checked) {
+                if (checked) {
+                    m_viewWidget->setUseCesiumCamera(true);
+                }
+            });
+
+    m_ignoreHorizontalRotationAction =
+        new QAction(tr("Rotation debug: ignore horizontal mouse movement"), this);
+    m_ignoreHorizontalRotationAction->setCheckable(true);
+    m_ignoreHorizontalRotationAction->setChecked(false);
+    connect(m_ignoreHorizontalRotationAction, &QAction::toggled,
+            m_viewWidget,
+            &OsgViewWidget::setIgnoreHorizontalRotationInput);
+
+    m_ignoreVerticalRotationAction =
+        new QAction(tr("Rotation debug: ignore vertical mouse movement"), this);
+    m_ignoreVerticalRotationAction->setCheckable(true);
+    m_ignoreVerticalRotationAction->setChecked(false);
+    connect(m_ignoreVerticalRotationAction, &QAction::toggled,
+            m_viewWidget,
+            &OsgViewWidget::setIgnoreVerticalRotationInput);
 }
 
 void MainWindow::createMenus()
@@ -97,6 +145,16 @@ void MainWindow::createMenus()
     fileMenu->addAction(m_closeAction);
     fileMenu->addSeparator();
     fileMenu->addAction(m_exitAction);
+
+    QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
+    QMenu* cameraMenu = viewMenu->addMenu(tr("Camera controller"));
+    cameraMenu->addAction(m_defaultCameraAction);
+    cameraMenu->addAction(m_cesiumCameraAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_pickDebugAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_ignoreHorizontalRotationAction);
+    viewMenu->addAction(m_ignoreVerticalRotationAction);
 }
 
 void MainWindow::createToolbar()
@@ -218,7 +276,7 @@ void MainWindow::openPotreeMetadata()
     statusBar()->showMessage(tr("Loaded Potree metadata: %1 records")
                                  .arg(m_potreeMetadataDataset->hierarchyRecordsLoaded),
                              8000);
-    QMessageBox::information(this, tr("Potree Metadata Summary"), summary);
+    /*QMessageBox::information(this, tr("Potree Metadata Summary"), summary);*/
 }
 
 QString MainWindow::selectPotreeMetadataPath()

@@ -20,4 +20,5 @@ struct NodeLoadRequest {
     std::uint64_t pointByteOffset = 0;
     std::uint64_t pointByteSize = 0;
     double requestWeight = 0.0;
+    bool hierarchyOnly = false;
 };

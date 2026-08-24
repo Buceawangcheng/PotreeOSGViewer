@@ -16,6 +16,13 @@
 
 namespace
 {
+// Diagnostic switches are retained for future A/B tests and disabled by default.
+constexpr bool kAttachOnlyRootForDiagnosis = false;
+constexpr bool kLoadOnlyRootForDiagnosis = false;
+constexpr bool kSkipHierarchyProxyLoadsForDiagnosis = false;
+constexpr bool kHierarchyOnlyNonRootDiagnosis = false;
+constexpr bool kPointCloudUpdateDiagnosticsEnabled = false;
+
 OctreeNode* findNodeByPath(OctreeNode* node, const std::string& nodeId)
 {
     if (!node) {
@@ -119,8 +126,28 @@ void PointCloudRuntime::openDataset(std::shared_ptr<PointCloudDataset> dataset, 
     rebuildNodeIndex();
     m_hasLastCameraState = false;
     m_lastSelection = SelectionResult {};
+    m_lastSlowUpdateLog = Clock::time_point {};
 
     if (m_dataset) {
+        if constexpr (kAttachOnlyRootForDiagnosis) {
+            qWarning().noquote()
+                << "Potree A/B diagnostic enabled: only the root node will be attached to OSG.";
+        }
+        if constexpr (kLoadOnlyRootForDiagnosis) {
+            qWarning().noquote()
+                << "Potree A/B diagnostic stage 2 enabled: non-root loading, CPU decoding "
+                   "and hierarchy patching are disabled.";
+        }
+        if constexpr (kSkipHierarchyProxyLoadsForDiagnosis) {
+            qWarning().noquote()
+                << "Potree A/B diagnostic stage 4 enabled: hierarchy proxy requests are disabled; "
+                   "ordinary point IO and CPU decoding remain enabled.";
+        }
+        if constexpr (kHierarchyOnlyNonRootDiagnosis) {
+            qWarning().noquote()
+                << "Potree A/B diagnostic stage 5 enabled: non-root hierarchy is resolved, "
+                   "but non-root point IO and CPU decoding are disabled.";
+        }
         m_settings.maxLevel = m_dataset->hierarchyDepth;
         m_residentPointTargetLimit = scaledPointLimit(m_settings.pointBudget, 6);
         m_residentPointLimit = scaledPointLimit(m_settings.pointBudget, 8);
@@ -148,6 +175,7 @@ void PointCloudRuntime::clear()
     m_nodeIndex.clear();
     m_hasLastCameraState = false;
     m_lastSelection = SelectionResult {};
+    m_lastSlowUpdateLog = Clock::time_point {};
 }
 
 void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
@@ -157,6 +185,7 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
     }
 
     ++m_frame;
+    const auto updateStart = Clock::now();
     const auto drainStart = Clock::now();
     const bool hierarchyChanged = applyCompletedResults();
     const auto drainFinish = Clock::now();
@@ -169,6 +198,7 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
         const auto attachStart = Clock::now();
         attachSelectedCpuReadyNodes(m_lastSelection, pointSize, false);
         const auto attachFinish = Clock::now();
+        scheduleSelectedNodes(m_lastSelection);
 
         m_stats.drainMs = elapsedMs(drainStart, drainFinish);
         m_stats.selectionMs = 0.0;
@@ -188,24 +218,61 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
     m_hasLastCameraState = true;
     m_lastSelection = selection;
 
+    const auto applySelectionStart = Clock::now();
     applySelection(selection);
+    const auto applySelectionFinish = Clock::now();
 
     const auto attachStart = Clock::now();
     attachSelectedCpuReadyNodes(selection, pointSize, true);
     const auto attachFinish = Clock::now();
 
+    const auto scheduleStart = Clock::now();
     scheduleSelectedNodes(selection);
+    const auto scheduleFinish = Clock::now();
     const auto evictStart = Clock::now();
     evictUnusedNodes();
     const auto evictFinish = Clock::now();
-    refreshStats(selection);
+    //refreshStats(selection);
 
-    m_stats.drainMs = elapsedMs(drainStart, drainFinish);
+    /*m_stats.drainMs = elapsedMs(drainStart, drainFinish);
     m_stats.selectionMs = elapsedMs(selectionStart, selectionFinish);
     m_stats.attachMs = elapsedMs(attachStart, attachFinish);
-    m_stats.evictMs = elapsedMs(evictStart, evictFinish);
+    m_stats.evictMs = elapsedMs(evictStart, evictFinish);*/
 
-    /*if ((m_frame % 60) == 0)*/ {
+    if constexpr (kPointCloudUpdateDiagnosticsEnabled) {
+        const auto updateFinish = Clock::now();
+        const double updateMs = elapsedMs(updateStart, updateFinish);
+        const double drainMs = elapsedMs(drainStart, drainFinish);
+        const double selectionMs = elapsedMs(selectionStart, selectionFinish);
+        const double applySelectionMs = elapsedMs(applySelectionStart, applySelectionFinish);
+        const double scheduleMs = elapsedMs(scheduleStart, scheduleFinish);
+        const double attachMs = elapsedMs(attachStart, attachFinish);
+        const double evictMs = elapsedMs(evictStart, evictFinish);
+        const double sinceLastLogMs = m_lastSlowUpdateLog == Clock::time_point {}
+            ? std::numeric_limits<double>::infinity()
+            : elapsedMs(m_lastSlowUpdateLog, updateFinish);
+        const bool hierarchyApplied = m_stats.hierarchyNodeCount > 0;
+        if ((hierarchyApplied || updateMs >= 2.0) && sinceLastLogMs >= 500.0) {
+            m_lastSlowUpdateLog = updateFinish;
+            qWarning().nospace()
+                << "PointCloud Update diagnostic frame=" << m_frame
+                << " totalMs=" << updateMs
+                << " drainMs=" << drainMs
+                << " hierarchyApplyMs=" << m_stats.hierarchyApplyMs
+                << " hierarchyIndexMs=" << m_stats.hierarchyIndexMs
+                << " hierarchyNodes=" << m_stats.hierarchyNodeCount
+                << " selectMs=" << selectionMs
+                << " applySelectionMs=" << applySelectionMs
+                << " scheduleMs=" << scheduleMs
+                << " attachMs=" << attachMs
+                << " evictMs=" << evictMs
+                << " selectedNodes=" << selection.selectedNodes.size()
+                << " loadCandidates=" << selection.loadCandidates.size()
+                << " outstanding=" << m_scheduler.outstandingCount();
+        }
+    }
+
+    /*if ((m_frame % 60) == 0){
         qInfo().nospace()
             << "LOD selected=" << m_stats.selectedNodeCount
             << " resident=" << m_stats.residentNodeCount
@@ -226,7 +293,7 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
             << " evictMs=" << m_stats.evictMs
             << " evicted=" << m_stats.evictedNodeCount
             << "/" << m_stats.evictedPointCount;
-    }
+    }*/
 }
 
 std::shared_ptr<PointCloudDataset> PointCloudRuntime::dataset() const
@@ -311,6 +378,10 @@ bool PointCloudRuntime::applyCompletedResults()
             }
         }
 
+        if (result.hierarchyOnly) {
+            continue;
+        }
+
         if (!result.pointData || result.pointData->positions.size() != node->pointCount) {
             node->pointDataState = PointDataState::Failed;
             continue;
@@ -379,7 +450,11 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
             || !node->data) {
             continue;
         }
-
+        if constexpr (kAttachOnlyRootForDiagnosis) {
+            if (node->id != "r") {
+                continue;
+            }
+        }
         const std::uint64_t bytes = node->data->cpuBytes();
         if (attachedNodes > 0 && attachedBytes + bytes > m_maxAttachBytesPerFrame) {
             break;
@@ -414,10 +489,31 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
 
 void PointCloudRuntime::scheduleSelectedNodes(const SelectionResult& selection)
 {
+    std::size_t outstandingLoads = m_scheduler.outstandingCount();
+    if (outstandingLoads >= m_maxOutstandingLoads) {
+        return;
+    }
+
     for (const NodeRequestCandidate& candidate : selection.loadCandidates) {
+        if constexpr (kSkipHierarchyProxyLoadsForDiagnosis) {
+            if (candidate.hierarchyProxy) {
+                continue;
+            }
+        }
+
         OctreeNode* node = findNode(candidate.nodeId);
         if (!node) {
             continue;
+        }
+        if constexpr (kLoadOnlyRootForDiagnosis) {
+            if (node->id != "r") {
+                continue;
+            }
+        }
+        if constexpr (kHierarchyOnlyNonRootDiagnosis) {
+            if (!candidate.hierarchyProxy && node->id != "r") {
+                continue;
+            }
         }
 
         if (candidate.hierarchyProxy) {
@@ -434,10 +530,17 @@ void PointCloudRuntime::scheduleSelectedNodes(const SelectionResult& selection)
         node->lastRequestedFrame = m_frame;
         ++node->requestGeneration;
         NodeLoadRequest request = makeRequest(*node, m_generation);
+        if constexpr (kHierarchyOnlyNonRootDiagnosis) {
+            request.hierarchyOnly = candidate.hierarchyProxy && node->id != "r";
+        }
         if (candidate.hierarchyProxy) {
             node->hierarchyState = HierarchyState::Queued;
         }
         m_scheduler.schedule(std::move(request));
+        ++outstandingLoads;
+        if (outstandingLoads >= m_maxOutstandingLoads) {
+            break;
+        }
     }
 }
 

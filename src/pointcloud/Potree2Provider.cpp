@@ -699,6 +699,7 @@ NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset
     result.datasetGeneration = request.datasetGeneration;
     result.nodeId = request.nodeId;
     result.requestGeneration = request.requestGeneration;
+    result.hierarchyOnly = request.hierarchyOnly;
 
     QString error;
     NodeLoadRequest pointRequest = request;
@@ -730,6 +731,10 @@ NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset
         pointRequest.pointCount = rootPatch.pointCount;
         pointRequest.pointByteOffset = rootPatch.pointByteOffset;
         pointRequest.pointByteSize = rootPatch.pointByteSize;
+
+        if (request.hierarchyOnly) {
+            return result;
+        }
     }
 
     result.pointData = loadNodeData(dataset, pointRequest, &error);

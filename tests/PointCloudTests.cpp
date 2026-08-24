@@ -3,6 +3,10 @@
 #include "pointcloud/NodeLoadScheduler.h"
 #include "viewer/PotreeRenderMasks.h"
 #include "viewer/SceneManager.h"
+#include "viewer/camera/CameraMath.h"
+#include "viewer/camera/CesiumCameraManipulator.h"
+#include "viewer/camera/DepthBufferPicker.h"
+#include "viewer/camera/PickDebugVisualizer.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -14,14 +18,27 @@
 #include <QThread>
 #include <QtEndian>
 
+#include <osg/Camera>
+#include <osg/AutoTransform>
+#include <osg/Depth>
 #include <osg/Geode>
 #include <osg/Geometry>
+#include <osg/Group>
+#include <osg/Math>
 #include <osg/Program>
+#include <osg/View>
+#include <osg/Switch>
 #include <osg/observer_ptr>
+#include <osgGA/GUIActionAdapter>
+#include <osgGA/GUIEventAdapter>
+#include <osgGA/TrackballManipulator>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -46,6 +63,64 @@ bool nearDouble(double actual, double expected)
 {
     return std::abs(actual - expected) < 0.0001;
 }
+
+bool nearMatrix(const osg::Matrixd& actual,
+                const osg::Matrixd& expected,
+                double epsilon = 1.0e-9)
+{
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            if (std::abs(actual(row, column) - expected(row, column)) > epsilon) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+class TestGuiActionAdapter : public osgGA::GUIActionAdapter
+{
+public:
+    osg::View* asView() override
+    {
+        return view;
+    }
+
+    void requestRedraw() override
+    {
+        redrawRequested = true;
+    }
+
+    void requestContinuousUpdate(bool needed = true) override
+    {
+        continuousUpdateRequested = needed;
+    }
+
+    void requestWarpPointer(float, float) override
+    {
+    }
+
+    bool redrawRequested = false;
+    bool continuousUpdateRequested = true;
+    osg::View* view = nullptr;
+};
+
+class TestDepthBufferPicker : public DepthBufferPicker
+{
+public:
+    bool takeRequest(DepthPickRequest& request)
+    {
+        return takePendingRequest(request);
+    }
+
+    void emitResult(const DepthPickResult& result)
+    {
+        publishResult(result);
+    }
+
+protected:
+    ~TestDepthBufferPicker() override = default;
+};
 
 bool writeFile(const QString& path, const QByteArray& bytes)
 {
@@ -930,6 +1005,1150 @@ void testPotreeSceneMultipleNodes()
     expect(scene.root()->getNumChildren() == 0,
            "multi-node Potree scene should clear cleanly");
 }
+
+void testCesiumCameraMatrixContract()
+{
+    osg::ref_ptr<CesiumCameraManipulator> manipulator = new CesiumCameraManipulator;
+
+    const osg::Vec3d eye(12.0, -8.0, 5.0);
+    const osg::Vec3d center(-2.0, 4.0, 1.0);
+    const osg::Vec3d up(0.0, 0.0, 1.0);
+    const osg::Matrixd viewMatrix = osg::Matrixd::lookAt(eye, center, up);
+    const osg::Matrixd cameraMatrix = osg::Matrixd::inverse(viewMatrix);
+
+    manipulator->setByMatrix(cameraMatrix);
+    expect(nearMatrix(manipulator->getMatrix(), cameraMatrix),
+           "setByMatrix/getMatrix should preserve a rigid camera matrix");
+    expect(nearMatrix(manipulator->getInverseMatrix(), viewMatrix),
+           "getInverseMatrix should return the matching view matrix");
+    expect(nearMatrix(manipulator->getMatrix() * manipulator->getInverseMatrix(),
+                      osg::Matrixd::identity()),
+           "camera and view matrices should be mutual inverses");
+
+    manipulator->setByInverseMatrix(viewMatrix);
+    expect(nearMatrix(manipulator->getMatrix(), cameraMatrix),
+           "setByInverseMatrix should recover camera position and orientation");
+
+    const osg::Matrixd beforeRoundTrip = manipulator->getMatrix();
+    manipulator->setByMatrix(manipulator->getMatrix());
+    expect(nearMatrix(manipulator->getMatrix(), beforeRoundTrip),
+           "setByMatrix(getMatrix()) should not move or rotate the camera");
+}
+
+void testCameraControllerMatrixTransfer()
+{
+    const osg::Vec3d eye(12.0, -8.0, 5.0);
+    const osg::Vec3d center(-2.0, 4.0, 1.0);
+    const osg::Matrixd cameraMatrix = osg::Matrixd::inverse(
+        osg::Matrixd::lookAt(eye, center, osg::Vec3d(0.0, 0.0, 1.0)));
+    const osg::Quat rotation = cameraMatrix.getRotate();
+    const double focusDistance = (center - eye).length();
+
+    osg::ref_ptr<CesiumCameraManipulator> cesium =
+        new CesiumCameraManipulator;
+    cesium->setByMatrix(cameraMatrix);
+    cesium->setFocusDistance(focusDistance);
+
+    osg::ref_ptr<osgGA::TrackballManipulator> trackball =
+        new osgGA::TrackballManipulator;
+    trackball->setTransformation(
+        eye,
+        eye + rotation * osg::Vec3d(0.0, 0.0, -focusDistance),
+        rotation * osg::Vec3d(0.0, 1.0, 0.0));
+    expect(nearMatrix(trackball->getMatrix(), cameraMatrix),
+           "switching to Trackball should preserve the camera matrix");
+
+    trackball->setDistance(focusDistance * 0.5);
+    const osg::Matrixd trackballMatrix = trackball->getMatrix();
+    cesium->setByMatrix(trackballMatrix);
+    cesium->setFocusDistance(trackball->getDistance());
+    expect(nearMatrix(cesium->getMatrix(), trackballMatrix)
+               && nearDouble(cesium->focusDistance(), focusDistance * 0.5),
+           "switching back to Cesium should preserve matrix and focus distance");
+
+    const double validDistance = cesium->focusDistance();
+    cesium->setFocusDistance(0.0);
+    expect(nearDouble(cesium->focusDistance(), validDistance),
+           "controller transfer should reject an invalid focus distance");
+}
+
+void testCesiumCameraHomeAndNodeContract()
+{
+    osg::ref_ptr<osg::Geode> scene = new osg::Geode;
+    osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+    osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
+    vertices->push_back(osg::Vec3(-4.0f, 1.0f, 2.0f));
+    vertices->push_back(osg::Vec3(8.0f, 1.0f, 2.0f));
+    vertices->push_back(osg::Vec3(2.0f, -5.0f, 2.0f));
+    vertices->push_back(osg::Vec3(2.0f, 7.0f, 2.0f));
+    vertices->push_back(osg::Vec3(2.0f, 1.0f, -4.0f));
+    vertices->push_back(osg::Vec3(2.0f, 1.0f, 8.0f));
+    geometry->setVertexArray(vertices.get());
+    geometry->addPrimitiveSet(new osg::DrawArrays(GL_POINTS, 0, vertices->size()));
+    scene->addDrawable(geometry.get());
+
+    osg::ref_ptr<CesiumCameraManipulator> manipulator = new CesiumCameraManipulator;
+    manipulator->setNode(scene.get());
+    expect(manipulator->getNode() == scene.get(),
+           "setNode/getNode should preserve the attached scene node");
+    const CesiumCameraManipulator* constManipulator = manipulator.get();
+    expect(constManipulator->getNode() == scene.get(),
+           "const getNode should return the attached scene node");
+
+    manipulator->home(0.0);
+    const osg::Matrixd firstHome = manipulator->getMatrix();
+    const osg::BoundingSphere bound = scene->getBound();
+    const osg::Vec3d homeEye = firstHome.getTrans();
+    const double homeDistance = (bound.center() - homeEye).length();
+    const osg::Vec3d pointOnForwardAxis = osg::Vec3d(0.0, 0.0, -homeDistance)
+        * firstHome;
+    expect((pointOnForwardAxis - bound.center()).length() < 1.0e-8,
+           "home should aim the camera local -Z axis at the scene bound center");
+    expect(homeDistance + 1.0e-9 >= static_cast<double>(bound.radius()) * 4.0,
+           "home(double) should use the conservative fallback framing distance");
+
+    manipulator->setByMatrix(osg::Matrixd::translate(100.0, 200.0, 300.0));
+    manipulator->home(1.0);
+    expect(nearMatrix(manipulator->getMatrix(), firstHome),
+           "repeated home(double) calls should be deterministic");
+
+    osg::ref_ptr<osgGA::GUIEventAdapter> event = new osgGA::GUIEventAdapter;
+    TestGuiActionAdapter action;
+    manipulator->setByMatrix(osg::Matrixd::translate(-10.0, -20.0, -30.0));
+    manipulator->home(*event, action);
+    expect(nearMatrix(manipulator->getMatrix(), firstHome),
+           "event home overload should produce the same fallback home pose");
+    expect(action.redrawRequested && !action.continuousUpdateRequested,
+           "event home should request one redraw and stop continuous updates");
+
+    osg::ref_ptr<osg::View> view = new osg::View;
+    view->getCamera()->setProjectionMatrixAsPerspective(30.0, 16.0 / 9.0, 0.1, 10000.0);
+    action.view = view.get();
+    manipulator->home(*event, action);
+    const double perspectiveHomeDistance =
+        (bound.center() - manipulator->getMatrix().getTrans()).length();
+    const double expectedPerspectiveDistance = static_cast<double>(bound.radius())
+        / std::sin(osg::DegreesToRadians(15.0)) * 1.05;
+    const double perspectiveDistanceTolerance =
+        std::max(1.0, expectedPerspectiveDistance) * 1.0e-6;
+    expect(std::abs(perspectiveHomeDistance - expectedPerspectiveDistance)
+               < perspectiveDistanceTolerance,
+           "event home should frame the scene using the active perspective FOV");
+
+    osg::ref_ptr<osg::Group> emptyScene = new osg::Group;
+    manipulator->setNode(emptyScene.get());
+    const osg::Matrixd poseBeforeInvalidHome = manipulator->getMatrix();
+    manipulator->home(2.0);
+    expect(nearMatrix(manipulator->getMatrix(), poseBeforeInvalidHome),
+           "home should preserve a valid pose when the scene bound is invalid");
+}
+
+void testCameraFramebufferCoordinatesAndRays()
+{
+    osg::ref_ptr<osg::Camera> camera = new osg::Camera;
+    camera->setViewport(0, 0, 800, 600);
+
+    const osg::Vec3d eye(0.0, -10.0, 2.0);
+    const osg::Vec3d center(0.0, 0.0, 0.0);
+    camera->setViewMatrixAsLookAt(eye, center, osg::Vec3d(0.0, 0.0, 1.0));
+    camera->setProjectionMatrixAsPerspective(60.0, 4.0 / 3.0, 0.1, 1000.0);
+
+    osg::ref_ptr<osgGA::GUIEventAdapter> event = new osgGA::GUIEventAdapter;
+    event->setWindowRectangle(0, 0, 800, 600);
+    int pixelX = -1;
+    int pixelY = -1;
+
+    event->setMouseYOrientation(osgGA::GUIEventAdapter::Y_INCREASING_UPWARDS);
+    event->setX(0.0f);
+    event->setY(0.0f);
+    expect(CameraMath::eventToFramebufferPixel(*event, *camera, pixelX, pixelY)
+               && pixelX == 0 && pixelY == 0,
+           "upward OSG event origin should map to the framebuffer origin");
+
+    event->setX(799.0f);
+    event->setY(599.0f);
+    expect(CameraMath::eventToFramebufferPixel(*event, *camera, pixelX, pixelY)
+               && pixelX == 799 && pixelY == 599,
+           "upward OSG event top-right should preserve framebuffer Y");
+
+    event->setMouseYOrientation(osgGA::GUIEventAdapter::Y_INCREASING_DOWNWARDS);
+    event->setX(0.0f);
+    event->setY(0.0f);
+    expect(CameraMath::eventToFramebufferPixel(*event, *camera, pixelX, pixelY)
+               && pixelX == 0 && pixelY == 599,
+           "downward OSG event top-left should map to top-left framebuffer pixel");
+
+    event->setX(799.0f);
+    event->setY(599.0f);
+    expect(CameraMath::eventToFramebufferPixel(*event, *camera, pixelX, pixelY)
+               && pixelX == 799 && pixelY == 0,
+           "downward OSG event bottom-right should map to framebuffer Y zero");
+
+    event->setX(800.0f);
+    expect(!CameraMath::eventToFramebufferPixel(*event, *camera, pixelX, pixelY),
+           "events outside the physical viewport should be rejected");
+
+    const osg::Vec3d forward = (center - eye) / (center - eye).length();
+    const osg::Matrixd cameraMatrix = osg::Matrixd::inverse(camera->getViewMatrix());
+    const osg::Quat cameraRotation = cameraMatrix.getRotate();
+    const osg::Vec3d right = cameraRotation * osg::Vec3d(1.0, 0.0, 0.0);
+    const osg::Vec3d up = cameraRotation * osg::Vec3d(0.0, 1.0, 0.0);
+
+    event->setMouseYOrientation(osgGA::GUIEventAdapter::Y_INCREASING_UPWARDS);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    osg::Vec3d rayOrigin;
+    osg::Vec3d rayDirection;
+    expect(CameraMath::buildPerspectiveMouseRay(
+               *event, *camera, eye, rayOrigin, rayDirection)
+               && (rayOrigin - eye).length() < 1.0e-12
+               && rayDirection * forward > 1.0 - 1.0e-10,
+           "center pixel ray should start at the perspective eye and follow camera forward");
+
+    event->setX(0.0f);
+    event->setY(599.0f);
+    expect(CameraMath::buildPerspectiveMouseRay(
+               *event, *camera, eye, rayOrigin, rayDirection)
+               && rayDirection * right < 0.0
+               && rayDirection * up > 0.0,
+           "top-left ray should point left and up in camera space");
+
+    struct PhysicalViewport
+    {
+        int width;
+        int height;
+    };
+    const PhysicalViewport dpiViewports[] = {{1000, 750}, {1200, 900}};
+    for (const PhysicalViewport viewport : dpiViewports) {
+        camera->setViewport(0, 0, viewport.width, viewport.height);
+        event->setWindowRectangle(0, 0, viewport.width, viewport.height);
+        camera->setProjectionMatrixAsPerspective(
+            60.0,
+            static_cast<double>(viewport.width) / viewport.height,
+            0.1,
+            1000.0);
+        event->setX(static_cast<float>(viewport.width / 2));
+        event->setY(static_cast<float>(viewport.height / 2));
+        expect(CameraMath::buildPerspectiveMouseRay(
+                   *event, *camera, eye, rayOrigin, rayDirection)
+                   && rayDirection * forward > 1.0 - 1.0e-10,
+               "physical center ray should not apply devicePixelRatio a second time");
+    }
+}
+
+void testCameraProjectionRoundTripAndNearFar()
+{
+    osg::ref_ptr<osg::Camera> camera = new osg::Camera;
+    camera->setViewport(0, 0, 1280, 720);
+    camera->setViewMatrixAsLookAt(
+        osg::Vec3d(4.0, -12.0, 6.0),
+        osg::Vec3d(1.0, 2.0, 0.5),
+        osg::Vec3d(0.0, 0.0, 1.0));
+    camera->setProjectionMatrixAsPerspective(45.0, 16.0 / 9.0, 0.01, 5000.0);
+
+    const osg::Vec3d worldPoint(1.5, 3.0, 0.75);
+    osg::Vec3d framebufferPoint;
+    osg::Vec3d reconstructedPoint;
+    expect(CameraMath::projectWorldToFramebuffer(
+               worldPoint, *camera, framebufferPoint)
+               && framebufferPoint.z() > 0.0 && framebufferPoint.z() < 1.0
+               && CameraMath::unprojectFramebufferPoint(
+                   framebufferPoint.x(),
+                   framebufferPoint.y(),
+                   framebufferPoint.z(),
+                   *camera,
+                   reconstructedPoint)
+               && (reconstructedPoint - worldPoint).length() < 1.0e-8,
+           "projecting and unprojecting should recover the original world point");
+
+    const osg::BoundingSphere bound(osg::Vec3d(0.0, 0.0, 0.0), 10.0f);
+    double nearPlane = 0.0;
+    double farPlane = 0.0;
+    expect(CameraMath::computePerspectiveNearFar(
+               osg::Vec3d(0.0, -100.0, 0.0),
+               bound,
+               10.0,
+               nearPlane,
+               farPlane)
+               && nearDouble(nearPlane, 89.0)
+               && nearDouble(farPlane, 111.0),
+           "near/far should include a padded scene bound when camera is outside it");
+
+    expect(CameraMath::computePerspectiveNearFar(
+               osg::Vec3d(0.0, 0.0, 0.0),
+               bound,
+               10.0,
+               nearPlane,
+               farPlane)
+               && nearPlane > 0.0
+               && nearDouble(nearPlane, 0.01)
+               && nearDouble(farPlane, 11.0),
+           "camera inside the scene bound should derive near from focus distance");
+
+    expect(CameraMath::computePerspectiveNearFar(
+               osg::Vec3d(0.0, 0.0, 0.0),
+               bound,
+               0.01,
+               nearPlane,
+               farPlane)
+               && nearDouble(nearPlane, 1.0e-5)
+               && nearDouble(farPlane, 11.0),
+           "near should shrink with focus distance for close detail views");
+
+    expect(!CameraMath::computePerspectiveNearFar(
+               osg::Vec3d(0.0, 0.0, 0.0),
+               bound,
+               0.0,
+               nearPlane,
+               farPlane),
+           "near/far should reject a non-positive focus distance");
+}
+
+void testCameraInteractionMath()
+{
+    double zoomDistance = 0.0;
+    expect(CameraMath::computeExponentialZoomDistance(
+               100.0, 1.0, 0.15, 0.1, 1000000.0, zoomDistance)
+               && nearDouble(zoomDistance, 85.0),
+           "one forward wheel step should apply the configured exponential zoom scale");
+    expect(CameraMath::computeExponentialZoomDistance(
+               100.0, -1.0, 0.15, 0.1, 1000000.0, zoomDistance)
+               && nearDouble(zoomDistance, 100.0 / 0.85),
+           "one backward wheel step should apply the reciprocal zoom scale");
+
+    double batchedDistance = 0.0;
+    expect(CameraMath::computeExponentialZoomDistance(
+               100.0, 3.0, 0.15, 0.1, 1000000.0, batchedDistance),
+           "batched exponential zoom should accept finite wheel steps");
+    double incrementalDistance = 100.0;
+    for (int step = 0; step < 3; ++step) {
+        double nextDistance = 0.0;
+        expect(CameraMath::computeExponentialZoomDistance(
+                   incrementalDistance,
+                   1.0,
+                   0.15,
+                   0.1,
+                   1000000.0,
+                   nextDistance),
+               "incremental exponential zoom step should remain valid");
+        incrementalDistance = nextDistance;
+    }
+    expect(std::abs(batchedDistance - incrementalDistance) < 1.0e-10,
+           "batched and repeated wheel steps should produce the same distance");
+
+    expect(CameraMath::computeExponentialZoomDistance(
+               0.11, 10.0, 0.15, 0.1, 1000000.0, zoomDistance)
+               && nearDouble(zoomDistance, 0.1),
+           "zoom-in distance should clamp at the minimum without crossing the pivot");
+    expect(CameraMath::computeExponentialZoomDistance(
+               999999.0, -10.0, 0.15, 0.1, 1000000.0, zoomDistance)
+               && nearDouble(zoomDistance, 1000000.0),
+           "zoom-out distance should clamp at the maximum");
+
+    osg::Vec3d intersection;
+    expect(CameraMath::intersectRayWithPlane(
+               osg::Vec3d(1.0, 2.0, 0.0),
+               osg::Vec3d(0.0, 0.0, 2.0),
+               osg::Vec3d(0.0, 0.0, 5.0),
+               osg::Vec3d(0.0, 0.0, 1.0),
+               intersection)
+               && (intersection - osg::Vec3d(1.0, 2.0, 5.0)).length() < 1.0e-12,
+           "forward ray should intersect the fixed mathematical plane");
+    expect(!CameraMath::intersectRayWithPlane(
+               osg::Vec3d(),
+               osg::Vec3d(1.0, 0.0, 0.0),
+               osg::Vec3d(0.0, 0.0, 5.0),
+               osg::Vec3d(0.0, 0.0, 1.0),
+               intersection),
+           "parallel ray should not produce a plane intersection");
+    expect(!CameraMath::intersectRayWithPlane(
+               osg::Vec3d(),
+               osg::Vec3d(0.0, 0.0, 1.0),
+               osg::Vec3d(0.0, 0.0, -1.0),
+               osg::Vec3d(0.0, 0.0, 1.0),
+               intersection),
+           "plane behind the ray origin should be rejected");
+
+    const double minimumPitch = osg::DegreesToRadians(-89.0);
+    const double maximumPitch = osg::DegreesToRadians(89.0);
+    double allowedPitch = 0.0;
+    expect(CameraMath::clampPitchDelta(
+               osg::Vec3d(0.0, 1.0, 0.0),
+               osg::Vec3d(0.0, 0.0, 1.0),
+               osg::DegreesToRadians(100.0),
+               minimumPitch,
+               maximumPitch,
+               allowedPitch)
+               && std::abs(allowedPitch - maximumPitch) < 1.0e-12,
+           "pitch request should clamp to the positive 89 degree limit");
+
+    const osg::Vec3d forwardAtEightyDegrees(
+        0.0,
+        std::cos(osg::DegreesToRadians(80.0)),
+        std::sin(osg::DegreesToRadians(80.0)));
+    expect(CameraMath::clampPitchDelta(
+               forwardAtEightyDegrees,
+               osg::Vec3d(0.0, 0.0, 1.0),
+               osg::DegreesToRadians(20.0),
+               minimumPitch,
+               maximumPitch,
+               allowedPitch)
+               && std::abs(allowedPitch - osg::DegreesToRadians(9.0)) < 1.0e-12,
+           "pitch clamp should derive the remaining motion from the current forward vector");
+}
+
+void testCesiumCameraImmediateInteractions()
+{
+    osg::ref_ptr<osg::View> view = new osg::View;
+    osg::Camera* camera = view->getCamera();
+    camera->setViewport(0, 0, 800, 600);
+    camera->setProjectionMatrixAsPerspective(60.0, 4.0 / 3.0, 0.1, 1000.0);
+
+    TestGuiActionAdapter action;
+    action.view = view.get();
+    osg::ref_ptr<osgGA::GUIEventAdapter> event = new osgGA::GUIEventAdapter;
+    event->setWindowRectangle(0, 0, 800, 600);
+    event->setMouseYOrientation(osgGA::GUIEventAdapter::Y_INCREASING_UPWARDS);
+    event->setX(400.0f);
+    event->setY(300.0f);
+
+    osg::ref_ptr<CesiumCameraManipulator> zoomManipulator =
+        new CesiumCameraManipulator;
+    const osg::Quat zoomRotationBefore = zoomManipulator->getMatrix().getRotate();
+    event->setEventType(osgGA::GUIEventAdapter::SCROLL);
+    event->setScrollingMotion(osgGA::GUIEventAdapter::SCROLL_UP);
+    expect(zoomManipulator->handle(*event, action),
+           "discrete scroll-up should be consumed by the camera manipulator");
+    expect((zoomManipulator->getMatrix().getTrans()
+            - osg::Vec3d(0.0, -8.5, 0.0)).length() < 1.0e-10,
+           "center scroll-up should move the eye by the 0.85 exponential scale");
+    const osg::Quat zoomRotationAfter = zoomManipulator->getMatrix().getRotate();
+    expect((zoomRotationBefore * osg::Vec3d(0.0, 0.0, -1.0)
+            - zoomRotationAfter * osg::Vec3d(0.0, 0.0, -1.0)).length()
+               < 1.0e-12,
+           "zoom should preserve camera orientation");
+    expect(action.redrawRequested && !action.continuousUpdateRequested,
+           "Immediate zoom should request one redraw without continuous updates");
+
+    for (int step = 0; step < 100; ++step) {
+        zoomManipulator->handle(*event, action);
+    }
+    const osg::Vec3d minimumZoomEye = zoomManipulator->getMatrix().getTrans();
+    expect(minimumZoomEye.y() < 0.0
+               && std::abs(minimumZoomEye.y() + 0.01) < 1.0e-9,
+           "repeated scroll-up should stop at the minimum distance without crossing the pivot");
+    event->setScrollingMotion(osgGA::GUIEventAdapter::SCROLL_DOWN);
+    expect(zoomManipulator->handle(*event, action)
+               && zoomManipulator->getMatrix().getTrans().y()
+                   < minimumZoomEye.y(),
+           "scroll-down should move away from the same default pivot");
+
+    osg::ref_ptr<CesiumCameraManipulator> panManipulator =
+        new CesiumCameraManipulator;
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforePanPush = panManipulator->getMatrix();
+    expect(panManipulator->handle(*event, action)
+               && nearMatrix(panManipulator->getMatrix(), beforePanPush),
+           "left-button press should establish the pan plane without moving the camera");
+
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    expect(panManipulator->handle(*event, action),
+           "left-button drag should update Immediate pan");
+    const osg::Matrixd afterPanDrag = panManipulator->getMatrix();
+    const osg::Vec3d forwardBeforePan = beforePanPush.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    const osg::Vec3d forwardAfterPan = afterPanDrag.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    expect((afterPanDrag.getTrans() - beforePanPush.getTrans()).length() > 0.1
+               && (forwardAfterPan - forwardBeforePan).length() < 1.0e-12,
+           "pan should translate the camera without changing its orientation");
+
+    event->setEventType(osgGA::GUIEventAdapter::RELEASE);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(0);
+    expect(panManipulator->handle(*event, action),
+           "left-button release should finish the Immediate pan gesture");
+    const osg::Matrixd afterPanRelease = panManipulator->getMatrix();
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setButtonMask(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setX(600.0f);
+    expect(!panManipulator->handle(*event, action)
+               && nearMatrix(panManipulator->getMatrix(), afterPanRelease),
+           "drag after release should not continue moving the camera");
+
+    osg::ref_ptr<CesiumCameraManipulator> rotateManipulator =
+        new CesiumCameraManipulator;
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforeRotatePush = rotateManipulator->getMatrix();
+    expect(rotateManipulator->handle(*event, action)
+               && nearMatrix(rotateManipulator->getMatrix(), beforeRotatePush),
+           "middle-button press should capture the pivot without a camera jump");
+
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    expect(rotateManipulator->handle(*event, action),
+           "middle-button horizontal drag should apply Immediate yaw");
+    osg::Matrixd rotatedMatrix = rotateManipulator->getMatrix();
+    osg::Vec3d rotatedEye = rotatedMatrix.getTrans();
+    osg::Vec3d rotatedForward = rotatedMatrix.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    expect(std::abs(rotatedEye.length() - 10.0) < 1.0e-9
+               && rotatedForward * (-rotatedEye / rotatedEye.length())
+                   > 1.0 - 1.0e-12,
+           "yaw should orbit at a fixed radius while continuing to look at the pivot");
+
+    event->setY(-10000.0f);
+    expect(rotateManipulator->handle(*event, action),
+           "large pitch drag should be handled and clamped");
+    rotatedMatrix = rotateManipulator->getMatrix();
+    rotatedForward = rotatedMatrix.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    osg::Vec3d rotatedRight = rotatedMatrix.getRotate()
+        * osg::Vec3d(1.0, 0.0, 0.0);
+    const double positivePitch = std::asin(std::clamp(
+        rotatedForward.z() / rotatedForward.length(), -1.0, 1.0));
+    expect(std::abs(positivePitch - osg::DegreesToRadians(89.0)) < 1.0e-9,
+           "rotation should clamp positive pitch to 89 degrees");
+    expect(std::abs(rotatedRight * osg::Vec3d(0.0, 0.0, 1.0)) < 1.0e-10,
+           "rotation should rebuild a roll-free right vector");
+
+    event->setY(10000.0f);
+    expect(rotateManipulator->handle(*event, action),
+           "opposite large pitch drag should remain valid");
+    rotatedMatrix = rotateManipulator->getMatrix();
+    rotatedForward = rotatedMatrix.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    rotatedRight = rotatedMatrix.getRotate()
+        * osg::Vec3d(1.0, 0.0, 0.0);
+    const double negativePitch = std::asin(std::clamp(
+        rotatedForward.z() / rotatedForward.length(), -1.0, 1.0));
+    expect(std::abs(negativePitch - osg::DegreesToRadians(-89.0)) < 1.0e-9,
+           "rotation should clamp negative pitch to -89 degrees");
+    expect(std::abs(rotatedRight * osg::Vec3d(0.0, 0.0, 1.0)) < 1.0e-10,
+           "repeated extreme rotation should not accumulate camera roll");
+}
+
+void testCesiumCameraDepthDrivenInteractions()
+{
+    osg::ref_ptr<osg::View> view = new osg::View;
+    osg::Camera* camera = view->getCamera();
+    camera->setViewport(0, 0, 800, 600);
+    camera->setProjectionMatrixAsPerspective(
+        60.0, 4.0 / 3.0, 0.1, 1000.0);
+
+    TestGuiActionAdapter action;
+    action.view = view.get();
+    osg::ref_ptr<osgGA::GUIEventAdapter> event =
+        new osgGA::GUIEventAdapter;
+    event->setWindowRectangle(0, 0, 800, 600);
+    event->setMouseYOrientation(
+        osgGA::GUIEventAdapter::Y_INCREASING_UPWARDS);
+
+    osg::ref_ptr<CesiumCameraManipulator> zoomManipulator =
+        new CesiumCameraManipulator;
+    osg::ref_ptr<TestDepthBufferPicker> zoomPicker =
+        new TestDepthBufferPicker;
+    osg::ref_ptr<PickDebugVisualizer> zoomVisualizer =
+        new PickDebugVisualizer;
+    zoomManipulator->setDepthBufferPicker(zoomPicker.get());
+    zoomManipulator->setPickDebugVisualizer(zoomVisualizer.get());
+    zoomManipulator->setPickDebugVisible(true);
+
+    event->setEventType(osgGA::GUIEventAdapter::SCROLL);
+    event->setScrollingMotion(osgGA::GUIEventAdapter::SCROLL_UP);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforePickedZoom = zoomManipulator->getMatrix();
+    expect(zoomManipulator->handle(*event, action)
+               && nearMatrix(zoomManipulator->getMatrix(), beforePickedZoom),
+           "depth-driven zoom should wait for the PostDraw result");
+    event->setX(500.0f);
+    expect(zoomManipulator->handle(*event, action)
+               && nearMatrix(zoomManipulator->getMatrix(), beforePickedZoom),
+           "a second wheel event should merge while depth is pending");
+
+    DepthPickRequest request;
+    expect(zoomPicker->takeRequest(request)
+               && request.action == PickAction::Zoom
+               && nearDouble(request.wheelSteps, 2.0)
+               && request.pixelX == 500,
+           "rapid discrete wheel input should keep latest coordinates and cumulative steps");
+    const osg::Vec3d zoomPivot(3.0, 1.0, 0.0);
+    DepthPickResult result;
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.wheelSteps = request.wheelSteps;
+    result.hitScene = true;
+    result.worldPoint = zoomPivot;
+    zoomPicker->emitResult(result);
+
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    zoomManipulator->handle(*event, action);
+    const double pickedZoomScale = std::pow(0.85, 2.0);
+    const osg::Vec3d expectedPickedZoomEye = zoomPivot
+        + (beforePickedZoom.getTrans() - zoomPivot) * pickedZoomScale;
+    expect((zoomManipulator->getMatrix().getTrans()
+            - expectedPickedZoomEye).length() < 1.0e-9
+               && zoomVisualizer->hasMarker()
+               && (zoomVisualizer->worldPoint() - zoomPivot).length()
+                   < 1.0e-12,
+           "valid depth should be the exponential zoom pivot and debug marker position");
+
+    event->setEventType(osgGA::GUIEventAdapter::SCROLL);
+    event->setScrollingMotion(osgGA::GUIEventAdapter::SCROLL_UP);
+    event->setX(200.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforeMissZoom = zoomManipulator->getMatrix();
+    expect(zoomManipulator->handle(*event, action)
+               && zoomPicker->takeRequest(request),
+           "background zoom should still submit a depth request");
+    osg::Vec3d missRayOrigin;
+    osg::Vec3d missRayDirection;
+    expect(CameraMath::buildPerspectiveMouseRay(
+               *event,
+               *camera,
+               zoomManipulator->getInverseMatrix(),
+               beforeMissZoom.getTrans(),
+               missRayOrigin,
+               missRayDirection),
+           "background zoom test should reconstruct the current mouse ray");
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.wheelSteps = request.wheelSteps;
+    result.hitScene = false;
+    zoomPicker->emitResult(result);
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    zoomManipulator->handle(*event, action);
+    const double focusDistanceAfterPickedZoom =
+        (beforePickedZoom.getTrans() - zoomPivot).length()
+        * pickedZoomScale;
+    missRayDirection.normalize();
+    const osg::Vec3d expectedMissZoomEye = beforeMissZoom.getTrans()
+        + missRayDirection * focusDistanceAfterPickedZoom * 0.15;
+    expect((zoomManipulator->getMatrix().getTrans()
+            - expectedMissZoomEye).length() < 1.0e-9
+               && !zoomVisualizer->hasMarker(),
+           "depth miss should use the current mouse ray and clear the old marker");
+
+    osg::ref_ptr<CesiumCameraManipulator> panManipulator =
+        new CesiumCameraManipulator;
+    osg::ref_ptr<TestDepthBufferPicker> panPicker =
+        new TestDepthBufferPicker;
+    panManipulator->setDepthBufferPicker(panPicker.get());
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforePickedPan = panManipulator->getMatrix();
+    osg::ref_ptr<osgGA::GUIEventAdapter> panPress =
+        new osgGA::GUIEventAdapter(*event);
+    expect(panManipulator->handle(*event, action)
+               && panPicker->takeRequest(request),
+           "left press should request a fixed pan-plane point");
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    osg::ref_ptr<osgGA::GUIEventAdapter> panDrag =
+        new osgGA::GUIEventAdapter(*event);
+    expect(panManipulator->handle(*event, action)
+               && nearMatrix(panManipulator->getMatrix(), beforePickedPan),
+           "pan should cache the latest drag without moving before depth resolves");
+
+    const osg::Vec3d panPlanePoint(2.0, 2.0, 0.0);
+    osg::Vec3d pressRayOrigin;
+    osg::Vec3d pressRayDirection;
+    osg::Vec3d dragRayOrigin;
+    osg::Vec3d dragRayDirection;
+    osg::Vec3d pressPlanePoint;
+    osg::Vec3d dragPlanePoint;
+    const osg::Vec3d panPlaneNormal(0.0, 1.0, 0.0);
+    expect(CameraMath::buildPerspectiveMouseRay(
+               *panPress,
+               *camera,
+               panManipulator->getInverseMatrix(),
+               beforePickedPan.getTrans(),
+               pressRayOrigin,
+               pressRayDirection)
+               && CameraMath::buildPerspectiveMouseRay(
+                   *panDrag,
+                   *camera,
+                   panManipulator->getInverseMatrix(),
+                   beforePickedPan.getTrans(),
+                   dragRayOrigin,
+                   dragRayDirection)
+               && CameraMath::intersectRayWithPlane(
+                   pressRayOrigin,
+                   pressRayDirection,
+                   panPlanePoint,
+                   panPlaneNormal,
+                   pressPlanePoint)
+               && CameraMath::intersectRayWithPlane(
+                   dragRayOrigin,
+                   dragRayDirection,
+                   panPlanePoint,
+                   panPlaneNormal,
+                   dragPlanePoint),
+           "picked pan plane should support press/latest-drag intersection");
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.wheelSteps = 0.0;
+    result.hitScene = true;
+    result.worldPoint = panPlanePoint;
+    panPicker->emitResult(result);
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    panManipulator->handle(*event, action);
+    const osg::Vec3d expectedPanEye = beforePickedPan.getTrans()
+        + pressPlanePoint - dragPlanePoint;
+    expect((panManipulator->getMatrix().getTrans() - expectedPanEye).length()
+                   < 1.0e-9
+               && (panManipulator->getMatrix().getRotate()
+                   * osg::Vec3d(0.0, 0.0, -1.0)
+                   - beforePickedPan.getRotate()
+                       * osg::Vec3d(0.0, 0.0, -1.0)).length()
+                   < 1.0e-12,
+           "resolved pan should apply cached motion on the picked fixed plane without rotating");
+
+    event->setEventType(osgGA::GUIEventAdapter::RELEASE);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(0);
+    expect(panManipulator->handle(*event, action),
+           "resolved pan should finish normally on release");
+
+    osg::ref_ptr<CesiumCameraManipulator> rotateManipulator =
+        new CesiumCameraManipulator;
+    osg::ref_ptr<TestDepthBufferPicker> rotatePicker =
+        new TestDepthBufferPicker;
+    rotateManipulator->setDepthBufferPicker(rotatePicker.get());
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforePickedRotate = rotateManipulator->getMatrix();
+    expect(rotateManipulator->handle(*event, action)
+               && rotatePicker->takeRequest(request),
+           "middle press should request a fixed rotation pivot");
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    expect(rotateManipulator->handle(*event, action)
+               && nearMatrix(rotateManipulator->getMatrix(), beforePickedRotate),
+           "rotate should cache drag motion without moving before depth resolves");
+    const osg::Vec3d rotationPivot(2.0, 1.0, 0.0);
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.hitScene = true;
+    result.worldPoint = rotationPivot;
+    rotatePicker->emitResult(result);
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    rotateManipulator->handle(*event, action);
+    const osg::Vec3d pickedRotateEye =
+        rotateManipulator->getMatrix().getTrans();
+    const double initialPivotDistance =
+        (beforePickedRotate.getTrans() - rotationPivot).length();
+    expect(!nearMatrix(rotateManipulator->getMatrix(), beforePickedRotate)
+               && std::abs((pickedRotateEye - rotationPivot).length()
+                           - initialPivotDistance) < 1.0e-9,
+           "resolved rotate should apply cached motion around the picked fixed pivot");
+
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButtonMask(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setX(550.0f);
+    expect(rotateManipulator->handle(*event, action)
+               && std::abs((rotateManipulator->getMatrix().getTrans()
+                            - rotationPivot).length()
+                           - initialPivotDistance) < 1.0e-9,
+           "subsequent rotate drag should retain the same pivot for the gesture");
+
+    const double yawOnlyEyeHeight =
+        (rotateManipulator->getMatrix().getTrans() - rotationPivot)
+            * osg::Vec3d(0.0, 0.0, 1.0);
+    const double yawOnlyForwardHeight =
+        (rotateManipulator->getMatrix().getRotate()
+         * osg::Vec3d(0.0, 0.0, -1.0))
+            * osg::Vec3d(0.0, 0.0, 1.0);
+    bool yawStayedOnWorldUp = true;
+    for (int step = 1; step <= 200; ++step) {
+        event->setX(550.0f + static_cast<float>(step));
+        event->setY(300.0f);
+        if (!rotateManipulator->handle(*event, action)) {
+            yawStayedOnWorldUp = false;
+            break;
+        }
+        const osg::Matrixd yawMatrix = rotateManipulator->getMatrix();
+        const double eyeHeight =
+            (yawMatrix.getTrans() - rotationPivot)
+                * osg::Vec3d(0.0, 0.0, 1.0);
+        const double forwardHeight =
+            (yawMatrix.getRotate() * osg::Vec3d(0.0, 0.0, -1.0))
+                * osg::Vec3d(0.0, 0.0, 1.0);
+        if (std::abs(eyeHeight - yawOnlyEyeHeight) > 1.0e-9
+            || std::abs(forwardHeight - yawOnlyForwardHeight) > 1.0e-9) {
+            yawStayedOnWorldUp = false;
+            break;
+        }
+    }
+    expect(yawStayedOnWorldUp,
+           "horizontal-only drag should remain a pure worldUp yaw after many increments");
+
+    osg::ref_ptr<CesiumCameraManipulator> missPanManipulator =
+        new CesiumCameraManipulator;
+    osg::ref_ptr<TestDepthBufferPicker> missPanPicker =
+        new TestDepthBufferPicker;
+    missPanManipulator->setDepthBufferPicker(missPanPicker.get());
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforeMissPan = missPanManipulator->getMatrix();
+    expect(missPanManipulator->handle(*event, action)
+               && missPanPicker->takeRequest(request),
+           "pan miss test should submit its press request");
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(450.0f);
+    missPanManipulator->handle(*event, action);
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.hitScene = false;
+    missPanPicker->emitResult(result);
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    missPanManipulator->handle(*event, action);
+    expect(!nearMatrix(missPanManipulator->getMatrix(), beforeMissPan)
+               && nearMatrix(osg::Matrixd::rotate(
+                                 missPanManipulator->getMatrix().getRotate()),
+                             osg::Matrixd::rotate(beforeMissPan.getRotate())),
+           "pan depth miss should fall back to the focusPoint view plane");
+
+    osg::ref_ptr<CesiumCameraManipulator> missRotateManipulator =
+        new CesiumCameraManipulator;
+    osg::ref_ptr<TestDepthBufferPicker> missRotatePicker =
+        new TestDepthBufferPicker;
+    missRotateManipulator->setDepthBufferPicker(missRotatePicker.get());
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforeMissRotate = missRotateManipulator->getMatrix();
+    expect(missRotateManipulator->handle(*event, action)
+               && missRotatePicker->takeRequest(request),
+           "rotate miss test should submit its press request");
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(450.0f);
+    missRotateManipulator->handle(*event, action);
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.hitScene = false;
+    missRotatePicker->emitResult(result);
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    missRotateManipulator->handle(*event, action);
+    expect(!nearMatrix(missRotateManipulator->getMatrix(), beforeMissRotate)
+               && std::abs(missRotateManipulator->getMatrix().getTrans().length()
+                           - 10.0) < 1.0e-9,
+           "rotate depth miss should fall back to the current focusPoint pivot");
+
+    osg::ref_ptr<CesiumCameraManipulator> staleManipulator =
+        new CesiumCameraManipulator;
+    osg::ref_ptr<TestDepthBufferPicker> stalePicker =
+        new TestDepthBufferPicker;
+    osg::ref_ptr<PickDebugVisualizer> staleVisualizer =
+        new PickDebugVisualizer;
+    staleManipulator->setDepthBufferPicker(stalePicker.get());
+    staleManipulator->setPickDebugVisualizer(staleVisualizer.get());
+    event->setEventType(osgGA::GUIEventAdapter::PUSH);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setX(400.0f);
+    event->setY(300.0f);
+    const osg::Matrixd beforeStaleGesture = staleManipulator->getMatrix();
+    expect(staleManipulator->handle(*event, action)
+               && stalePicker->takeRequest(request),
+           "stale-result test should take the request as if PostDraw had begun");
+    event->setEventType(osgGA::GUIEventAdapter::RELEASE);
+    event->setButton(osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+    event->setButtonMask(0);
+    expect(staleManipulator->handle(*event, action),
+           "release before depth completion should end the pending gesture");
+    result.generation = request.generation;
+    result.sequence = request.sequence;
+    result.action = request.action;
+    result.hitScene = true;
+    result.worldPoint = osg::Vec3d(50.0, 50.0, 50.0);
+    stalePicker->emitResult(result);
+    event->setEventType(osgGA::GUIEventAdapter::FRAME);
+    staleManipulator->handle(*event, action);
+    expect(nearMatrix(staleManipulator->getMatrix(), beforeStaleGesture)
+               && !staleVisualizer->hasMarker(),
+           "result arriving after release should not move the camera or update the marker");
+}
+
+void testCesiumCameraRotationInputFilters()
+{
+    osg::ref_ptr<osg::View> view = new osg::View;
+    osg::Camera* camera = view->getCamera();
+    camera->setViewport(0, 0, 800, 600);
+    camera->setProjectionMatrixAsPerspective(
+        60.0, 4.0 / 3.0, 0.1, 1000.0);
+
+    TestGuiActionAdapter action;
+    action.view = view.get();
+    osg::ref_ptr<osgGA::GUIEventAdapter> event =
+        new osgGA::GUIEventAdapter;
+    event->setWindowRectangle(0, 0, 800, 600);
+    event->setMouseYOrientation(
+        osgGA::GUIEventAdapter::Y_INCREASING_UPWARDS);
+
+    auto beginRotate = [&](CesiumCameraManipulator& manipulator) {
+        event->setEventType(osgGA::GUIEventAdapter::PUSH);
+        event->setButton(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+        event->setButtonMask(osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON);
+        event->setX(400.0f);
+        event->setY(300.0f);
+        return manipulator.handle(*event, action);
+    };
+
+    osg::ref_ptr<CesiumCameraManipulator> ignoreVertical =
+        new CesiumCameraManipulator;
+    expect(!ignoreVertical->ignoreHorizontalRotationInput()
+               && !ignoreVertical->ignoreVerticalRotationInput(),
+           "rotation input debug filters should be disabled by default");
+    ignoreVertical->setIgnoreVerticalRotationInput(true);
+    expect(beginRotate(*ignoreVertical),
+           "vertical-filter test should begin rotation");
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    event->setY(450.0f);
+    expect(ignoreVertical->handle(*event, action),
+           "vertical-filter test should consume mixed-axis drag");
+    const osg::Matrixd yawOnlyMatrix = ignoreVertical->getMatrix();
+    const osg::Vec3d yawOnlyForward = yawOnlyMatrix.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    expect(std::abs(yawOnlyMatrix.getTrans().z()) < 1.0e-12
+               && std::abs(yawOnlyForward.z()) < 1.0e-12
+               && std::abs(yawOnlyMatrix.getTrans().x()) > 0.1,
+           "ignoring vertical mouse input should leave only worldUp yaw");
+
+    osg::ref_ptr<CesiumCameraManipulator> ignoreHorizontal =
+        new CesiumCameraManipulator;
+    ignoreHorizontal->setIgnoreHorizontalRotationInput(true);
+    expect(beginRotate(*ignoreHorizontal),
+           "horizontal-filter test should begin rotation");
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    event->setY(350.0f);
+    expect(ignoreHorizontal->handle(*event, action),
+           "horizontal-filter test should consume mixed-axis drag");
+    const osg::Matrixd pitchOnlyMatrix = ignoreHorizontal->getMatrix();
+    const osg::Vec3d pitchOnlyForward = pitchOnlyMatrix.getRotate()
+        * osg::Vec3d(0.0, 0.0, -1.0);
+    expect(std::abs(pitchOnlyMatrix.getTrans().x()) < 1.0e-12
+               && std::abs(pitchOnlyForward.x()) < 1.0e-12
+               && std::abs(pitchOnlyMatrix.getTrans().z()) > 0.1,
+           "ignoring horizontal mouse input should leave only camera-right pitch");
+
+    osg::ref_ptr<CesiumCameraManipulator> ignoreBoth =
+        new CesiumCameraManipulator;
+    ignoreBoth->setIgnoreHorizontalRotationInput(true);
+    ignoreBoth->setIgnoreVerticalRotationInput(true);
+    expect(beginRotate(*ignoreBoth),
+           "dual-filter test should begin rotation");
+    const osg::Matrixd beforeIgnoredDrag = ignoreBoth->getMatrix();
+    event->setEventType(osgGA::GUIEventAdapter::DRAG);
+    event->setButton(0);
+    event->setX(500.0f);
+    event->setY(400.0f);
+    expect(ignoreBoth->handle(*event, action)
+               && nearMatrix(ignoreBoth->getMatrix(), beforeIgnoredDrag),
+           "enabling both filters should suppress all rotation motion");
+}
+
+void testDepthPickerSelectionAndInvalidation()
+{
+    osg::ref_ptr<osg::Viewport> viewport =
+        new osg::Viewport(0.0, 0.0, 10.0, 8.0);
+    DepthReadRegion region;
+    expect(DepthBufferPicker::computeReadRegion(5, 4, *viewport, region)
+               && region.x == 3 && region.y == 2
+               && region.width == 5 && region.height == 5,
+           "depth picker should read a centered 5x5 region inside the viewport");
+    expect(DepthBufferPicker::computeReadRegion(0, 0, *viewport, region)
+               && region.x == 0 && region.y == 0
+               && region.width == 3 && region.height == 3,
+           "depth picker should clip its read region at the lower-left viewport edge");
+    expect(DepthBufferPicker::computeReadRegion(9, 7, *viewport, region)
+               && region.x == 7 && region.y == 5
+               && region.width == 3 && region.height == 3,
+           "depth picker should clip its read region at the upper-right viewport edge");
+    expect(!DepthBufferPicker::computeReadRegion(10, 7, *viewport, region),
+           "depth picker should reject requests outside the viewport");
+
+    region = {3, 2, 5, 5};
+    std::array<float, 25> depths;
+    depths.fill(1.0f);
+    depths[2 * 5 + 0] = 0.1f;
+    depths[1 * 5 + 2] = 0.7f;
+    DepthSampleSelection selection;
+    expect(DepthBufferPicker::selectNearestValidDepth(
+               depths.data(), depths.size(), region, 5, 4, selection)
+               && selection.pixelX == 5 && selection.pixelY == 3
+               && std::abs(selection.depth - 0.7f) < 1.0e-7f,
+           "5x5 picker should choose the valid sample nearest the requested pixel");
+
+    depths[2 * 5 + 2] = 0.9f;
+    expect(DepthBufferPicker::selectNearestValidDepth(
+               depths.data(), depths.size(), region, 5, 4, selection)
+               && selection.pixelX == 5 && selection.pixelY == 4
+               && std::abs(selection.depth - 0.9f) < 1.0e-7f,
+           "center valid depth should win even when a farther sample is shallower");
+
+    depths.fill(1.0f);
+    depths[0] = 0.0f;
+    depths[1] = std::numeric_limits<float>::quiet_NaN();
+    expect(!DepthBufferPicker::selectNearestValidDepth(
+               depths.data(), depths.size(), region, 5, 4, selection),
+           "zero, non-finite and cleared depths should produce a background miss");
+
+    depths.fill(1.0f);
+    depths[2 * 5 + 2] = std::nextafter(1.0f, 0.0f);
+    expect(DepthBufferPicker::selectNearestValidDepth(
+               depths.data(), depths.size(), region, 5, 4, selection)
+               && selection.pixelX == 5 && selection.pixelY == 4
+               && selection.depth < 1.0f,
+           "visible depth immediately below the clear value should remain pickable");
+
+    DepthPickResult result;
+    result.generation = 7;
+    result.sequence = 12;
+    expect(DepthBufferPicker::isResultCurrent(result, 7, 12),
+           "matching generation and sequence should accept a depth result");
+    expect(!DepthBufferPicker::isResultCurrent(result, 8, 12),
+           "scene generation change should invalidate an old depth result");
+    expect(!DepthBufferPicker::isResultCurrent(result, 7, 13),
+           "newer request sequence should invalidate an old depth result");
+
+    osg::ref_ptr<DepthBufferPicker> picker = new DepthBufferPicker;
+    DepthPickRequest request;
+    request.generation = 1;
+    request.sequence = 1;
+    picker->requestPick(request);
+    picker->clear();
+    expect(!picker->consumeResult(result),
+           "clearing the picker should discard queued mailbox state");
+}
+
+void testPickDebugVisualizerState()
+{
+    osg::ref_ptr<PickDebugVisualizer> visualizer = new PickDebugVisualizer;
+    expect(!visualizer->visible() && !visualizer->hasMarker(),
+           "pick debug visualizer should be hidden and empty by default");
+    expect(visualizer->node()->getNodeMask() == PotreeRenderMasks::PickDebug,
+           "pick marker should use its independent debug node mask");
+
+    osg::Switch* markerSwitch = dynamic_cast<osg::Switch*>(visualizer->node());
+    osg::AutoTransform* markerTransform = markerSwitch
+        ? dynamic_cast<osg::AutoTransform*>(markerSwitch->getChild(0))
+        : nullptr;
+    expect(markerSwitch && markerTransform
+               && markerTransform->getAutoScaleToScreen()
+               && !markerSwitch->getValue(0),
+           "pick marker should use a hidden fixed-screen-size transform");
+
+    const osg::StateSet* stateSet = visualizer->node()->getStateSet();
+    const osg::Depth* depth = stateSet
+        ? dynamic_cast<const osg::Depth*>(
+            stateSet->getAttribute(osg::StateAttribute::DEPTH))
+        : nullptr;
+    expect(depth && depth->getFunction() == osg::Depth::ALWAYS
+               && !depth->getWriteMask(),
+           "pick marker should always be visible without writing depth");
+
+    visualizer->setVisible(true);
+    visualizer->show(osg::Vec3d(1.0, 2.0, 3.0), PickAction::Zoom);
+    expect(visualizer->hasMarker() && markerSwitch->getValue(0)
+               && (visualizer->worldPoint() - osg::Vec3d(1.0, 2.0, 3.0)).length()
+                   < 1.0e-12
+               && visualizer->color() == osg::Vec4(1.0f, 1.0f, 0.0f, 1.0f),
+           "Zoom pick should display a yellow marker at the world position");
+
+    visualizer->show(osg::Vec3d(4.0, 5.0, 6.0), PickAction::BeginPan);
+    expect(visualizer->color() == osg::Vec4(0.0f, 1.0f, 1.0f, 1.0f),
+           "Pan pick should display a cyan marker");
+    visualizer->show(osg::Vec3d(7.0, 8.0, 9.0), PickAction::BeginRotate);
+    expect(visualizer->color() == osg::Vec4(1.0f, 0.0f, 1.0f, 1.0f),
+           "Rotate pick should display a magenta marker");
+
+    osg::ref_ptr<osg::Group> mainScene = new osg::Group;
+    osg::ref_ptr<osg::Geode> mainGeode = new osg::Geode;
+    osg::ref_ptr<osg::Geometry> mainGeometry = new osg::Geometry;
+    osg::ref_ptr<osg::Vec3Array> mainVertices = new osg::Vec3Array;
+    mainVertices->push_back(osg::Vec3(-1.0f, -1.0f, -1.0f));
+    mainVertices->push_back(osg::Vec3(1.0f, 1.0f, 1.0f));
+    mainGeometry->setVertexArray(mainVertices.get());
+    mainGeometry->addPrimitiveSet(
+        new osg::DrawArrays(GL_POINTS, 0, mainVertices->size()));
+    mainGeode->addDrawable(mainGeometry.get());
+    mainScene->addChild(mainGeode.get());
+    const osg::BoundingSphere mainBoundBefore = mainScene->getBound();
+    osg::ref_ptr<osg::Camera> separateDebugCamera = new osg::Camera;
+    separateDebugCamera->addChild(visualizer->node());
+    const osg::BoundingSphere mainBoundAfter = mainScene->getBound();
+    expect((mainBoundAfter.center() - mainBoundBefore.center()).length() < 1.0e-12
+               && std::abs(mainBoundAfter.radius() - mainBoundBefore.radius())
+                   < 1.0e-12,
+           "marker attached to a separate debug camera should not affect the main scene bound");
+
+    visualizer->clear();
+    expect(!visualizer->hasMarker() && !markerSwitch->getValue(0),
+           "failed or cleared pick should hide the previous marker");
+}
+
+void testProjectionUpdateRunsAfterViewUpdate()
+{
+    osg::ref_ptr<CesiumCameraManipulator> manipulator = new CesiumCameraManipulator;
+    osg::ref_ptr<osg::Camera> camera = new osg::Camera;
+    const osg::Matrixd expectedView = osg::Matrixd::lookAt(
+        osg::Vec3d(5.0, -7.0, 3.0),
+        osg::Vec3d(0.0, 0.0, 0.0),
+        osg::Vec3d(0.0, 0.0, 1.0));
+    manipulator->setByInverseMatrix(expectedView);
+
+    bool callbackRan = false;
+    bool callbackSawUpdatedView = false;
+    manipulator->setPostViewUpdateCallback(
+        [&](osg::Camera& updatedCamera) {
+            callbackRan = true;
+            callbackSawUpdatedView = nearMatrix(
+                updatedCamera.getViewMatrix(), expectedView);
+        });
+    manipulator->updateCamera(*camera);
+
+    expect(callbackRan && callbackSawUpdatedView,
+           "projection hook should run only after manipulator writes the current view matrix");
+}
 } // namespace
 
 int main(int argc, char* argv[])
@@ -948,6 +2167,18 @@ int main(int argc, char* argv[])
     testLodPixelThresholdAndProxy();
     testNodeLoadSchedulerCompletionQueue();
     testPotreeSceneMultipleNodes();
+    testCesiumCameraMatrixContract();
+    testCameraControllerMatrixTransfer();
+    testCesiumCameraHomeAndNodeContract();
+    testCameraFramebufferCoordinatesAndRays();
+    testCameraProjectionRoundTripAndNearFar();
+    testCameraInteractionMath();
+    testCesiumCameraImmediateInteractions();
+    testCesiumCameraDepthDrivenInteractions();
+    testCesiumCameraRotationInputFilters();
+    testDepthPickerSelectionAndInvalidation();
+    testPickDebugVisualizerState();
+    testProjectionUpdateRunsAfterViewUpdate();
 
     if (failures == 0) {
         std::cout << "All point-cloud tests passed.\n";
