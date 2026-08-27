@@ -1,4 +1,4 @@
-#include "viewer/PotreeSceneBackend.h"
+﻿#include "viewer/PotreeSceneBackend.h"
 
 #include "pointcloud/BoundingBox.h"
 #include "pointcloud/PointCloudDataset.h"
@@ -151,6 +151,8 @@ bool PotreeSceneBackend::attachNode(const std::string& nodeId,
                                     float pointSize,
                                     QString* errorMessage)
 {
+    // 调用点位于 PointCloudRuntime 的 update traversal。这里开始创建 OSG 对象，
+    // 因而绝不能挪到负责 IO/解码的 NodeLoadScheduler 工作线程。
     if (!m_layerTransform.valid()) {
         beginLayer(dataset, pointSize);
     }
@@ -174,6 +176,7 @@ bool PotreeSceneBackend::attachNode(const std::string& nodeId,
         return true;
     }
 
+    // 将工作线程产生的 CPU 数组复制进 OSG Array，并配置 VBO/GL_POINTS draw call。
     osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
     vertices->assign(data.positions.begin(), data.positions.end());
 
@@ -224,6 +227,8 @@ bool PotreeSceneBackend::attachNode(const std::string& nodeId,
     visual.levelColors = levelColors;
     visual.pointCount = static_cast<std::uint64_t>(data.positions.size());
     visual.gpuBytes = data.cpuBytes();
+    // 加入 layer 后，该节点成为 resident；后续 cull traversal 根据 NodeMask 决定
+    // 是否进入 draw traversal，真正的 OpenGL 上传通常由 OSG 在绘制阶段完成。
     m_layerTransform->addChild(transform.get());
     m_nodes.emplace(nodeId, std::move(visual));
     return true;
@@ -236,6 +241,7 @@ void PotreeSceneBackend::setNodeVisible(const std::string& nodeId, bool visible)
         return;
     }
 
+    // 隐藏只改 NodeMask，保留 Geometry/VBO 驻留，以便相机小幅往返时快速复用。
     it->second.transform->setNodeMask(
         visible ? PotreeRenderMasks::VisibleNode : 0u);
 }
@@ -247,6 +253,7 @@ void PotreeSceneBackend::removeNode(const std::string& nodeId)
         return;
     }
 
+    // 淘汰才真正从场景树和 resident 映射移除；OSG ref_ptr 生命周期随后释放资源。
     if (m_layerTransform.valid()) {
         m_layerTransform->removeChild(it->second.transform.get());
     }

@@ -1,4 +1,4 @@
-#include "pointcloud/LodSelector.h"
+﻿#include "pointcloud/LodSelector.h"
 
 #include <osg/Vec4d>
 
@@ -56,6 +56,7 @@ SelectionResult LodSelector::select(const OctreeNode& root,
                                     const LodSelectionSettings& settings) const
 {
     SelectionResult result;
+    // 权重是节点在屏幕上的投影半径；priority_queue 让最重要的节点先占用预算。
     std::priority_queue<QueueItem, std::vector<QueueItem>, QueueItemLess> queue;
     std::uint64_t sequence = 0;
     queue.push({&root, std::numeric_limits<double>::infinity(), sequence++});
@@ -87,6 +88,7 @@ SelectionResult LodSelector::select(const OctreeNode& root,
             result.overBudget = true;
         }
 
+        // selected 表示“本帧希望看到”，不要求节点此刻已经 resident/CpuReady。
         result.selectedPointCount += node->pointCount;
         result.highestSelectedLevel = std::max(result.highestSelectedLevel, node->level);
         const bool unresolvedHierarchy = node->type == OctreeNodeType::Proxy
@@ -102,6 +104,8 @@ SelectionResult LodSelector::select(const OctreeNode& root,
         });
 
         if (unresolvedHierarchy) {
+            // Proxy 的子结构未知：先把它作为 fallback 选中并请求 hierarchy，当前
+            // 遍历不能继续进入尚不存在的 children。
             if (node->hierarchyState == HierarchyState::Proxy) {
                 result.loadCandidates.push_back({node->id, item.weight, true});
             }
@@ -109,6 +113,7 @@ SelectionResult LodSelector::select(const OctreeNode& root,
         }
 
         if (node->pointDataState == PointDataState::Unloaded) {
+            // 选择器只报告候选，不改变状态；Runtime 稍后按 outstanding 上限提交。
             result.loadCandidates.push_back({node->id, item.weight, false});
         }
 
@@ -117,6 +122,7 @@ SelectionResult LodSelector::select(const OctreeNode& root,
                 continue;
             }
             const double childWeight = projectedPixelRadius(*child, camera);
+            // 屏幕投影过小的子节点不再细分，减少远处节点遍历和加载。
             if (childWeight >= settings.minimumNodePixelSize) {
                 queue.push({child.get(), childWeight, sequence++});
             }

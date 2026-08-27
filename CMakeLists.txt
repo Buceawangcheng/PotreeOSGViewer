@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    set(CMAKE_TOOLCHAIN_FILE "D:/wc/vcpkg/vcpkg/scripts/buildsystems/vcpkg.cmake"
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
+    file(TO_CMAKE_PATH "$ENV{VCPKG_ROOT}" VCPKG_ROOT_DIR)
+    set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT_DIR}/scripts/buildsystems/vcpkg.cmake"
         CACHE FILEPATH "vcpkg toolchain file")
 endif()
 
@@ -15,21 +16,56 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-set(QT_ROOT_DIR "D:/Qt/MyQt/5.15.2/msvc2019_64" CACHE PATH "Qt 5.15.2 MSVC2019 x64 root")
-set(OSGQT_ROOT "D:/wc/software/AI/osg/osgQt-master/install" CACHE PATH "osgQt install root")
-set(OSGQT_DEBUG_ROOT "${OSGQT_ROOT}/debug" CACHE PATH "osgQt Debug install root")
-set(OSGQT_RELEASE_ROOT "${OSGQT_ROOT}/release" CACHE PATH "osgQt Release install root")
-set(VCPKG_INSTALLED_DIR "D:/wc/vcpkg/vcpkg/installed" CACHE PATH "vcpkg installed root")
+set(QT_ROOT_DIR "" CACHE PATH "Qt 5 MSVC x64 root")
+set(OSGQT_ROOT "" CACHE PATH "osgQt install root containing debug and release")
+set(OSGQT_DEBUG_ROOT "" CACHE PATH "osgQt Debug install root")
+set(OSGQT_RELEASE_ROOT "" CACHE PATH "osgQt Release install root")
+set(VCPKG_INSTALLED_DIR "" CACHE PATH "vcpkg installed root")
+set(OSG_PLUGIN_VERSION "3.6.5" CACHE STRING "OpenSceneGraph plugin directory version")
+set(OSG_PLUGINS_DEBUG "" CACHE PATH "OpenSceneGraph Debug plugin directory")
+set(OSG_PLUGINS_RELEASE "" CACHE PATH "OpenSceneGraph Release plugin directory")
 
-list(APPEND CMAKE_PREFIX_PATH "${QT_ROOT_DIR}")
-set(Qt5_DIR "${QT_ROOT_DIR}/lib/cmake/Qt5" CACHE PATH "Qt5 CMake package directory" FORCE)
-set(Qt5Core_DIR "${QT_ROOT_DIR}/lib/cmake/Qt5Core" CACHE PATH "Qt5Core CMake package directory" FORCE)
-set(Qt5Gui_DIR "${QT_ROOT_DIR}/lib/cmake/Qt5Gui" CACHE PATH "Qt5Gui CMake package directory" FORCE)
-set(Qt5Widgets_DIR "${QT_ROOT_DIR}/lib/cmake/Qt5Widgets" CACHE PATH "Qt5Widgets CMake package directory" FORCE)
-set(Qt5OpenGL_DIR "${QT_ROOT_DIR}/lib/cmake/Qt5OpenGL" CACHE PATH "Qt5OpenGL CMake package directory" FORCE)
+if(QT_ROOT_DIR)
+    list(PREPEND CMAKE_PREFIX_PATH "${QT_ROOT_DIR}")
+endif()
+
+if(OSGQT_ROOT)
+    if(NOT OSGQT_DEBUG_ROOT)
+        set(OSGQT_DEBUG_ROOT "${OSGQT_ROOT}/debug")
+    endif()
+    if(NOT OSGQT_RELEASE_ROOT)
+        set(OSGQT_RELEASE_ROOT "${OSGQT_ROOT}/release")
+    endif()
+endif()
+
+if(NOT OSGQT_DEBUG_ROOT OR NOT OSGQT_RELEASE_ROOT)
+    message(FATAL_ERROR
+        "Set OSGQT_ROOT, or set both OSGQT_DEBUG_ROOT and OSGQT_RELEASE_ROOT.")
+endif()
 
 find_package(Qt5 REQUIRED COMPONENTS Widgets OpenGL)
 find_package(unofficial-osg CONFIG REQUIRED)
+
+if(NOT OSG_INCLUDE_DIR)
+    unset(OSG_INCLUDE_DIR CACHE)
+    find_path(OSG_INCLUDE_DIR
+        NAMES osg/Node
+        DOC "OpenSceneGraph include root"
+        REQUIRED
+    )
+endif()
+
+if(NOT QT_ROOT_DIR)
+    get_target_property(QT_QMAKE_EXECUTABLE Qt5::qmake IMPORTED_LOCATION)
+    if(NOT QT_QMAKE_EXECUTABLE)
+        message(FATAL_ERROR
+            "Qt was found, but QT_ROOT_DIR could not be inferred. Set QT_ROOT_DIR explicitly.")
+    endif()
+    get_filename_component(QT_BIN_DIR "${QT_QMAKE_EXECUTABLE}" DIRECTORY)
+    get_filename_component(QT_ROOT_DIR "${QT_BIN_DIR}" DIRECTORY)
+else()
+    set(QT_BIN_DIR "${QT_ROOT_DIR}/bin")
+endif()
 
 find_path(OSGQOPENGL_INCLUDE_DIR
     NAMES osgQOpenGL/osgQOpenGLWidget
@@ -156,6 +192,7 @@ target_link_libraries(PotreeOSGViewer PRIVATE
 
 target_include_directories(PotreeOSGViewer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OSG_INCLUDE_DIR}"
 )
 
 include(CTest)
@@ -209,25 +246,70 @@ if(BUILD_TESTING)
 
     target_include_directories(PotreePointCloudTests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${VCPKG_INSTALLED_DIR}/x64-windows/include"
+        "${OSG_INCLUDE_DIR}"
     )
 
     if(MSVC)
-        target_compile_options(PotreePointCloudTests PRIVATE /W4 /permissive-)
+        target_compile_options(PotreePointCloudTests PRIVATE /W4 /permissive- /utf-8)
     endif()
 
     add_test(NAME PotreePointCloudTests COMMAND PotreePointCloudTests)
 endif()
 
 if(MSVC)
-    target_compile_options(PotreeOSGViewer PRIVATE /W4 /permissive-)
+    target_compile_options(PotreeOSGViewer PRIVATE /W4 /permissive- /utf-8)
 endif()
 
-set(QT_BIN_DIR "${QT_ROOT_DIR}/bin")
-set(VCPKG_BIN_RELEASE "${VCPKG_INSTALLED_DIR}/x64-windows/bin")
-set(VCPKG_BIN_DEBUG "${VCPKG_INSTALLED_DIR}/x64-windows/debug/bin")
-set(OSG_PLUGINS_RELEASE "${OSGQT_RELEASE_ROOT}/share/OpenSceneGraph/bin/osgPlugins-3.6.5")
-set(OSG_PLUGINS_DEBUG "${VCPKG_INSTALLED_DIR}/x64-windows/debug/plugins/osgPlugins-3.6.5")
+if(NOT VCPKG_INSTALLED_DIR)
+    if(DEFINED _VCPKG_INSTALLED_DIR)
+        set(VCPKG_INSTALLED_DIR "${_VCPKG_INSTALLED_DIR}")
+    elseif(DEFINED VCPKG_ROOT_DIR)
+        set(VCPKG_INSTALLED_DIR "${VCPKG_ROOT_DIR}/installed")
+    elseif(DEFINED ENV{VCPKG_ROOT})
+        file(TO_CMAKE_PATH "$ENV{VCPKG_ROOT}/installed" VCPKG_INSTALLED_DIR)
+    endif()
+endif()
+
+if(VCPKG_TARGET_TRIPLET)
+    set(POTREEOSGVIEWER_VCPKG_TRIPLET "${VCPKG_TARGET_TRIPLET}")
+else()
+    set(POTREEOSGVIEWER_VCPKG_TRIPLET "x64-windows")
+endif()
+
+if(VCPKG_INSTALLED_DIR)
+    set(VCPKG_TRIPLET_DIR
+        "${VCPKG_INSTALLED_DIR}/${POTREEOSGVIEWER_VCPKG_TRIPLET}")
+    set(VCPKG_BIN_RELEASE "${VCPKG_TRIPLET_DIR}/bin")
+    set(VCPKG_BIN_DEBUG "${VCPKG_TRIPLET_DIR}/debug/bin")
+endif()
+
+if(NOT OSG_PLUGINS_RELEASE)
+    foreach(candidate
+            "${VCPKG_TRIPLET_DIR}/plugins/osgPlugins-${OSG_PLUGIN_VERSION}"
+            "${OSGQT_RELEASE_ROOT}/share/OpenSceneGraph/bin/osgPlugins-${OSG_PLUGIN_VERSION}")
+        if(EXISTS "${candidate}")
+            set(OSG_PLUGINS_RELEASE "${candidate}")
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(NOT OSG_PLUGINS_DEBUG)
+    foreach(candidate
+            "${VCPKG_TRIPLET_DIR}/debug/plugins/osgPlugins-${OSG_PLUGIN_VERSION}"
+            "${OSGQT_DEBUG_ROOT}/share/OpenSceneGraph/bin/osgPlugins-${OSG_PLUGIN_VERSION}")
+        if(EXISTS "${candidate}")
+            set(OSG_PLUGINS_DEBUG "${candidate}")
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(NOT IS_DIRECTORY "${OSG_PLUGINS_RELEASE}"
+        OR NOT IS_DIRECTORY "${OSG_PLUGINS_DEBUG}")
+    message(FATAL_ERROR
+        "OpenSceneGraph plugin directories were not found. Set OSG_PLUGINS_RELEASE and OSG_PLUGINS_DEBUG.")
+endif()
 
 set_target_properties(PotreeOSGViewer PROPERTIES
     VS_DEBUGGER_ENVIRONMENT
@@ -251,12 +333,14 @@ add_custom_command(TARGET PotreeOSGViewer POST_BUILD
         "$<TARGET_FILE_DIR:PotreeOSGViewer>/plugins/platforms"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "$<IF:$<CONFIG:Debug>,${OSG_PLUGINS_DEBUG},${OSG_PLUGINS_RELEASE}>"
-        "$<TARGET_FILE_DIR:PotreeOSGViewer>/osgPlugins-3.6.5"
+        "$<TARGET_FILE_DIR:PotreeOSGViewer>/osgPlugins-${OSG_PLUGIN_VERSION}"
     COMMENT "Deploying Qt, osgQt and OSG plugin runtime files"
 )
 
 message(STATUS "Qt root: ${QT_ROOT_DIR}")
 message(STATUS "vcpkg installed: ${VCPKG_INSTALLED_DIR}")
+message(STATUS "OSG release plugins: ${OSG_PLUGINS_RELEASE}")
+message(STATUS "OSG debug plugins: ${OSG_PLUGINS_DEBUG}")
 message(STATUS "osgQt include: ${OSGQOPENGL_INCLUDE_DIR}")
 message(STATUS "osgQt release lib: ${OSGQOPENGL_LIBRARY_RELEASE}")
 message(STATUS "osgQt debug lib: ${OSGQOPENGL_LIBRARY_DEBUG}")

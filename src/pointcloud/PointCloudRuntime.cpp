@@ -184,20 +184,31 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
         return;
     }
 
+    // 本函数运行在 OSG update traversal。完整流水线是：
+    // 1. drain 工作线程结果并在主线程落地；
+    // 2. 相机/hierarchy 未变化时复用上次 LOD，只继续 attach 和补请求；
+    // 3. 否则重新遍历 Octree 选择 LOD并更新 resident 节点可见性；
+    // 4. 按预算把 CpuReady 节点挂到 OSG，随后补充异步请求；
+    // 5. resident cache 超预算时分帧淘汰，之后由 OSG 继续 cull/draw traversal。
     ++m_frame;
     const auto updateStart = Clock::now();
     const auto drainStart = Clock::now();
+    //接收后台线程已经完成的结果，把节点更新为 CpuReady
     const bool hierarchyChanged = applyCompletedResults();
     const auto drainFinish = Clock::now();
 
     const CameraState currentCamera = cameraState(viewer);
+    // 异步结果会改变 CpuReady/Queued 状态，但只要没有新增 hierarchy，节点集合和
+    // 相机都不变，就无需再次执行 LOD/全树可见性/淘汰遍历。
     if (!hierarchyChanged
         && m_hasLastCameraState
         && cameraStateNearlyEqual(currentCamera, m_lastCameraState)
         && !m_lastSelection.selectedNodes.empty()) {
         const auto attachStart = Clock::now();
+        //将 CPU-ready 数据挂到 OSG/GPU，每帧限制 2 个节点或 32 MB
         attachSelectedCpuReadyNodes(m_lastSelection, pointSize, false);
         const auto attachFinish = Clock::now();
+        //维持最多 4 个后台加载任务，不断为完成后的空位补充新任务
         scheduleSelectedNodes(m_lastSelection);
 
         m_stats.drainMs = elapsedMs(drainStart, drainFinish);
@@ -209,6 +220,7 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
         return;
     }
 
+    // 阶段 2：纯 CPU best-first 遍历，生成本帧目标节点和加载候选；不做 IO。
     const auto selectionStart = Clock::now();
     const SelectionResult selection = m_selector.select(*m_dataset->root,
                                                         currentCamera,
@@ -218,17 +230,21 @@ void PointCloudRuntime::update(osgViewer::Viewer* viewer, float pointSize)
     m_hasLastCameraState = true;
     m_lastSelection = selection;
 
+    // 阶段 3：把 selected 映射为已有 resident OSG 节点的显示/隐藏状态。
     const auto applySelectionStart = Clock::now();
     applySelection(selection);
     const auto applySelectionFinish = Clock::now();
 
+    // 阶段 4：只挂载已经 CpuReady 的 selected 节点，并受单帧预算限制。
     const auto attachStart = Clock::now();
     attachSelectedCpuReadyNodes(selection, pointSize, true);
     const auto attachFinish = Clock::now();
 
+    // 阶段 5：对 selected 中仍 Unloaded/Proxy 的节点制作值快照并提交后台。
     const auto scheduleStart = Clock::now();
     scheduleSelectedNodes(selection);
     const auto scheduleFinish = Clock::now();
+    // 阶段 6：渲染预算与 resident cache 分离；仅在缓存超过上限时回收旧节点。
     const auto evictStart = Clock::now();
     evictUnusedNodes();
     const auto evictFinish = Clock::now();
@@ -326,6 +342,8 @@ CameraState PointCloudRuntime::cameraState(osgViewer::Viewer* viewer) const
 
 bool PointCloudRuntime::applyCompletedResults()
 {
+    // drainCompleted() 用 swap 一次取走当前所有结果。下面所有 live Octree 修改均在
+    // 主/update线程执行，工作线程从不直接写 node。
     const std::vector<NodeLoadResult> completed = m_scheduler.drainCompleted();
     Potree2Provider provider;
     double hierarchyMs = 0.0;
@@ -334,11 +352,13 @@ bool PointCloudRuntime::applyCompletedResults()
     bool hierarchyChanged = false;
 
     for (const NodeLoadResult& result : completed) {
+        // 数据集已切换/clear：丢弃旧 dataset 的晚到结果。
         if (result.datasetGeneration != m_generation) {
             continue;
         }
 
         OctreeNode* node = findNode(result.nodeId);
+        // 同一节点已重新请求：丢弃更早 requestGeneration 的结果。
         if (!node || node->requestGeneration != result.requestGeneration) {
             continue;
         }
@@ -354,6 +374,8 @@ bool PointCloudRuntime::applyCompletedResults()
         }
 
         if (!result.hierarchyPatch.nodes.empty()) {
+            // Proxy 的 hierarchy patch 先合并到 live Octree。新增节点改变了下一次
+            // LOD 可遍历的集合，因此 hierarchyChanged 会强制本帧重新选择。
             hierarchyNodeCount += result.hierarchyPatch.nodes.size();
             const auto start = Clock::now();
             QString error;
@@ -363,6 +385,7 @@ bool PointCloudRuntime::applyCompletedResults()
             }
             hierarchyMs += elapsedMs(start, Clock::now());
 
+            // 只为 patch 涉及的节点增量维护 id 索引，避免每个结果重扫整棵树。
             const auto indexStart = Clock::now();
             for (const HierarchyNodePatch& nodePatch : result.hierarchyPatch.nodes) {
                 if (OctreeNode* patchedNode = findNodeByPath(
@@ -379,6 +402,7 @@ bool PointCloudRuntime::applyCompletedResults()
         }
 
         if (result.hierarchyOnly) {
+            // 该诊断请求只展开结构，不包含 pointData。
             continue;
         }
 
@@ -387,6 +411,8 @@ bool PointCloudRuntime::applyCompletedResults()
             continue;
         }
 
+        // 后台值结果至此才正式进入 live node：Queued -> CpuReady。真正的 OSG
+        // Geometry 创建留给 attachSelectedCpuReadyNodes() 按帧预算执行。
         node->data = result.pointData;
         node->cpuBytes = result.pointData->cpuBytes();
         node->pointDataState = PointDataState::CpuReady;
@@ -400,6 +426,7 @@ bool PointCloudRuntime::applyCompletedResults()
 
 void PointCloudRuntime::applySelection(const SelectionResult& selection)
 {
+    // 先用当前帧号标记本次 selected 集合。
     for (const NodeSelection& selected : selection.selectedNodes) {
         OctreeNode* node = findNode(selected.nodeId);
         if (!node) {
@@ -409,6 +436,8 @@ void PointCloudRuntime::applySelection(const SelectionResult& selection)
         node->selectionWeight = selected.weight;
     }
 
+    // 再遍历所有 resident 节点：本帧选中则显示，否则隐藏。未 resident 节点即使
+    // 被 selected，也要等 CpuReady -> attach 后才能参与 cull/draw。
     visitNodes(m_dataset->root.get(), [this](OctreeNode& node) {
         if (node.gpuState != GpuState::Resident) {
             return;
@@ -435,10 +464,14 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
     m_stats.attachedPointCount = 0;
 
     for (const NodeSelection& selected : selection.selectedNodes) {
+        // OSG Geometry/VBO 创建可能阻塞 update traversal，因此同时限制节点数和
+        // CPU 数组字节数，把大量完成结果分摊到后续帧。
         if (attachedNodes >= m_maxAttachNodesPerFrame
             || attachedBytes >= m_maxAttachBytesPerFrame) {
             break;
         }
+        // 新 selection 可相信快照以快速跳过；静止相机复用旧 selection 时传 false，
+        // 因为后台任务可能已把当时的非 CpuReady 节点变为 CpuReady。
         if (selected.resident || (trustSelectionState && !selected.cpuReady)) {
             continue;
         }
@@ -461,6 +494,7 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
         }
 
         QString error;
+        // 从这里开始进入 OSG 后端；只能在主/update线程创建/挂接场景对象。
         if (!m_sceneManager
             || !m_sceneManager->attachPotreeNode(
                 node->id,
@@ -478,6 +512,7 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
         node->gpuBytes = bytes;
         node->lastVisibleFrame = m_frame;
         node->lastAccessFrame = m_frame;
+        // OSG arrays 已经持有自己的数据，释放临时 CPU 解码结果，节点转为 Resident。
         node->data.reset();
         node->cpuBytes = 0;
         ++attachedNodes;
@@ -489,6 +524,7 @@ void PointCloudRuntime::attachSelectedCpuReadyNodes(const SelectionResult& selec
 
 void PointCloudRuntime::scheduleSelectedNodes(const SelectionResult& selection)
 {
+    // outstanding = 调度器 pending + 正在执行，限制请求积压和瞬时内存占用。
     std::size_t outstandingLoads = m_scheduler.outstandingCount();
     if (outstandingLoads >= m_maxOutstandingLoads) {
         return;
@@ -516,6 +552,8 @@ void PointCloudRuntime::scheduleSelectedNodes(const SelectionResult& selection)
             }
         }
 
+        // 必须检查 live 状态：SelectionResult 是快照，静止相机时会跨帧复用。
+        // 状态门禁同时避免同一候选被每帧重复入队。
         if (candidate.hierarchyProxy) {
             if (node->hierarchyState != HierarchyState::Proxy) {
                 continue;
@@ -529,6 +567,7 @@ void PointCloudRuntime::scheduleSelectedNodes(const SelectionResult& selection)
         node->requestWeight = candidate.weight;
         node->lastRequestedFrame = m_frame;
         ++node->requestGeneration;
+        // makeRequest() 复制全部加载字段；工作线程不会持有 node 指针。
         NodeLoadRequest request = makeRequest(*node, m_generation);
         if constexpr (kHierarchyOnlyNonRootDiagnosis) {
             request.hierarchyOnly = candidate.hierarchyProxy && node->id != "r";
@@ -566,6 +605,7 @@ void PointCloudRuntime::evictUnusedNodes()
     std::size_t evictedNodesThisFrame = 0;
     std::uint64_t evictedPointsThisFrame = 0;
 
+    // 最久未访问优先；当前 selected、仍有请求在途或近期可见的节点受到保护。
     std::sort(residentNodes.begin(), residentNodes.end(), [](const OctreeNode* lhs, const OctreeNode* rhs) {
         return lhs->lastAccessFrame < rhs->lastAccessFrame;
     });
@@ -657,6 +697,8 @@ OctreeNode* PointCloudRuntime::findNode(const std::string& nodeId) const
 NodeLoadRequest PointCloudRuntime::makeRequest(const OctreeNode& node,
                                                std::uint64_t datasetGeneration)
 {
+    // 跨线程只传值快照。即使 hierarchy patch 后 Octree 容器发生变化，工作线程也
+    // 不会解引用失效指针；结果回来时再通过 id + generation 查找和验证 live node。
     NodeLoadRequest request;
     request.datasetGeneration = datasetGeneration;
     request.nodeId = node.id;

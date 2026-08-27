@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "viewer/PotreeColorMode.h"
 
@@ -20,6 +20,12 @@ class PointCloudShaderState;
 struct BoundingBox;
 struct PointCloudNodeData;
 
+// Potree 节点到 OSG 场景图的主线程后端。
+//
+// attachNode() 把解码后的 CPU 数组构造成 Geometry/VBO 状态并加入 layer；
+// setNodeVisible() 通过 NodeMask 控制本帧是否参与 cull/draw；removeNode() 从场景树
+// 和 resident 映射中删除节点。所有接口都由 PointCloudRuntime/SceneManager 在
+// SingleThreaded update traversal 中调用，不能从 NodeLoadScheduler 工作线程调用。
 class PotreeSceneBackend {
 public:
     explicit PotreeSceneBackend(osg::Group* root);
@@ -47,6 +53,7 @@ public:
     std::size_t residentNodeCount() const;
 
 private:
+    // 一个 resident 节点对应的 OSG 资源及缓存统计。
     struct NodeVisual {
         osg::ref_ptr<osg::MatrixTransform> transform;
         osg::ref_ptr<osg::Geometry> geometry;

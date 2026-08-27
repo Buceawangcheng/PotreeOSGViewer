@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "pointcloud/LodSelector.h"
 #include "pointcloud/NodeLoadScheduler.h"
@@ -42,6 +42,11 @@ struct PointCloudRuntimeStats {
     bool overBudget = false;
 };
 
+// 点云流式运行时的主线程编排器。
+//
+// 每次 OSG update traversal 中，它依次接收后台结果、选择 LOD、更新可见性、
+// 分帧挂载 CPU-ready 节点、补充异步请求并按缓存预算淘汰节点。它是 live Octree
+// 状态和 OSG 场景修改的唯一入口；NodeLoadScheduler 的工作线程只返回值对象。
 class PointCloudRuntime {
 public:
     explicit PointCloudRuntime(SceneManager* sceneManager);
@@ -58,13 +63,19 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
+    // update() 主流程拆分出的各阶段，调用顺序见 PointCloudRuntime.cpp。
     CameraState cameraState(osgViewer::Viewer* viewer) const;
+    // 过滤晚到结果，在主线程应用 hierarchy patch，并把点数组标记为 CpuReady。
     bool applyCompletedResults();
+    // 把 LOD 选择映射为 resident OSG 节点的可见/隐藏状态。
     void applySelection(const SelectionResult& selection);
+    // 按单帧节点数/字节预算，将 CpuReady 数据转换为 OSG Geometry。
     void attachSelectedCpuReadyNodes(const SelectionResult& selection,
                                      float pointSize,
                                      bool trustSelectionState);
+    // 将选中但未加载的节点快照提交到有界后台调度器。
     void scheduleSelectedNodes(const SelectionResult& selection);
+    // resident cache 超预算时，按最近访问时间分帧移除 OSG 节点。
     void evictUnusedNodes();
     void refreshStats(const SelectionResult& selection);
     void rebuildNodeIndex();
@@ -73,16 +84,18 @@ private:
     static NodeLoadRequest makeRequest(const OctreeNode& node,
                                        std::uint64_t datasetGeneration);
 
-    SceneManager* m_sceneManager = nullptr;
+    SceneManager* m_sceneManager = nullptr; // 非拥有；仅在主/update线程调用。
     std::shared_ptr<PointCloudDataset> m_dataset;
     NodeLoadScheduler m_scheduler;
     LodSelector m_selector;
     LodSelectionSettings m_settings;
     PointCloudRuntimeStats m_stats;
+    // 主线程索引；hierarchy patch 创建节点后增量更新，避免反复递归查找整棵树。
     std::unordered_map<std::string, OctreeNode*> m_nodeIndex;
     CameraState m_lastCameraState;
     SelectionResult m_lastSelection;
     Clock::time_point m_lastSlowUpdateLog;
+    // 数据集切换/clear 时递增，使旧工作线程结果失效。
     std::uint64_t m_generation = 0;
     std::uint64_t m_frame = 0;
     bool m_hasLastCameraState = false;

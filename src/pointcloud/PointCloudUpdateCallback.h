@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <osg/NodeCallback>
 
@@ -10,6 +10,9 @@ class Viewer;
 
 class PointCloudRuntime;
 
+// 挂在场景根节点上的 OSG update traversal 回调。
+// Viewer 保持 SingleThreaded，因此 operator()、PointCloudRuntime::update()、
+// Octree 修改和 OSG 节点挂载都在同一主/update线程中执行。
 class PointCloudUpdateCallback : public osg::NodeCallback {
 public:
     PointCloudUpdateCallback(PointCloudRuntime* runtime,

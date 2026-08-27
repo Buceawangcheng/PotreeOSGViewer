@@ -1,4 +1,4 @@
-#include "pointcloud/NodeLoadScheduler.h"
+﻿#include "pointcloud/NodeLoadScheduler.h"
 
 #include "pointcloud/Potree2Provider.h"
 
@@ -10,6 +10,7 @@
 
 namespace
 {
+// 常驻线程总数。实际同时工作的线程数还会受到 State::maxConcurrentLoads 限制。
 constexpr std::size_t PersistentWorkerCount = 4;
 }
 
@@ -17,6 +18,8 @@ struct NodeLoadScheduler::State {
     struct PendingLess {
         bool operator()(const NodeLoadRequest& lhs, const NodeLoadRequest& rhs) const
         {
+            // std::priority_queue 会把“更大”的元素放在队首，因此权重更高的
+            // 可见节点优先加载；权重相同时，requestGeneration 较小者优先。
             if (lhs.requestWeight == rhs.requestWeight) {
                 return lhs.requestGeneration > rhs.requestGeneration;
             }
@@ -24,7 +27,11 @@ struct NodeLoadScheduler::State {
         }
     };
 
+    // mutex 保护下面所有共享状态。锁只覆盖入队、出队和状态更新，不覆盖耗时的
+    // 文件 IO、hierarchy 解析或点数据解码。
     mutable std::mutex mutex;
+
+    // 工作线程在没有任务、没有数据集或并发额度已满时休眠，避免空转占用 CPU。
     std::condition_variable condition;
     std::shared_ptr<PointCloudDataset> dataset;
     std::priority_queue<NodeLoadRequest, std::vector<NodeLoadRequest>, PendingLess> pending;
@@ -32,6 +39,9 @@ struct NodeLoadScheduler::State {
     std::size_t maxConcurrentLoads = 4;
     std::size_t loading = 0;
     bool shutdown = false;
+
+    // 工作线程完成任务后复制回调，并在释放 mutex 后调用，避免回调重入调度器
+    // 时发生死锁。
     std::function<void()> completionCallback;
 };
 
@@ -55,6 +65,8 @@ NodeLoadScheduler::~NodeLoadScheduler()
         }
         m_state->dataset.reset();
     }
+    // 唤醒所有可能阻塞在 condition.wait() 的工作线程。正在执行 IO/解码的线程
+    // 会先完成当前任务，然后在下一轮循环观察到 shutdown 并退出。
     m_state->condition.notify_all();
     for (std::thread& worker : m_workers) {
         if (worker.joinable()) {
@@ -68,6 +80,8 @@ void NodeLoadScheduler::setDataset(std::shared_ptr<PointCloudDataset> dataset)
     {
         std::lock_guard<std::mutex> lock(m_state->mutex);
         m_state->dataset = std::move(dataset);
+        // 只能取消尚未出队的请求。已经被工作线程取走的请求持有自己的 dataset
+        // shared_ptr 快照，其结果最终由运行时的 generation 校验过滤。
         while (!m_state->pending.empty()) {
             m_state->pending.pop();
         }
@@ -105,6 +119,7 @@ void NodeLoadScheduler::schedule(NodeLoadRequest request)
         }
         m_state->pending.push(std::move(request));
     }
+    // 修改共享状态后再通知；此时工作线程醒来即可立即取得 mutex 并看到新请求。
     m_state->condition.notify_all();
 }
 
@@ -112,6 +127,7 @@ std::vector<NodeLoadResult> NodeLoadScheduler::drainCompleted()
 {
     std::vector<NodeLoadResult> completed;
     std::lock_guard<std::mutex> lock(m_state->mutex);
+    // 常数时间交换容器，结果的析构和后续处理都在锁外完成。
     completed.swap(m_state->completed);
     return completed;
 }
@@ -141,6 +157,8 @@ void NodeLoadScheduler::workerLoop(const std::shared_ptr<State>& state)
         std::shared_ptr<PointCloudDataset> dataset;
         {
             std::unique_lock<std::mutex> lock(state->mutex);
+            // wait(lock, predicate) 会在休眠时释放 mutex，醒来后重新加锁并检查条件，
+            // 因而可以正确处理虚假唤醒。
             state->condition.wait(lock, [&]() {
                 return state->shutdown
                     || (state->dataset
@@ -157,6 +175,8 @@ void NodeLoadScheduler::workerLoop(const std::shared_ptr<State>& state)
             ++state->loading;
         }
 
+        // 最耗时的 IO、解析和解码明确放在锁外；其他工作线程和主线程不会因此
+        // 被阻塞。
         Potree2Provider provider;
         NodeLoadResult result = provider.ensureNodeReady(*dataset, request);
 
@@ -168,6 +188,7 @@ void NodeLoadScheduler::workerLoop(const std::shared_ptr<State>& state)
             callback = state->completionCallback;
         }
 
+        // 回调可能间接请求一次 viewer/update，必须在释放 mutex 后执行。
         if (callback) {
             callback();
         }

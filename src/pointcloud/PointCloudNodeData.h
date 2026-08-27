@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <osg/Vec3d>
 #include <osg/Vec3f>
@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <vector>
 
+// 工作线程解码得到的单节点 CPU 数据。
+// positions 使用相对 origin 的 float 坐标以保持精度；主线程挂载成功后，数组会
+// 被复制/交给 OSG Geometry，OctreeNode::data 随即释放以控制 CPU 峰值。
 struct PointCloudNodeData {
     osg::Vec3d origin;
     std::vector<osg::Vec3f> positions;

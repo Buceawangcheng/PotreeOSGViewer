@@ -1,4 +1,4 @@
-#include "pointcloud/Potree2Provider.h"
+﻿#include "pointcloud/Potree2Provider.h"
 
 #include <QDir>
 #include <QFile>
@@ -695,6 +695,8 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
 NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset,
                                                 const NodeLoadRequest& request) const
 {
+    // 此函数由 NodeLoadScheduler 工作线程调用。所有输入均来自 request 快照，
+    // 返回值也不包含 live OctreeNode 指针。
     NodeLoadResult result;
     result.datasetGeneration = request.datasetGeneration;
     result.nodeId = request.nodeId;
@@ -704,6 +706,8 @@ NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset
     QString error;
     NodeLoadRequest pointRequest = request;
     if (request.hierarchyState == HierarchyState::Proxy) {
+        // Proxy 请求先读取/解析 hierarchy.bin 分块。用局部临时节点适配已有解析
+        // 接口，不会触碰主线程拥有的真实 OctreeNode。
         OctreeNode proxy;
         proxy.id = request.nodeId;
         proxy.level = request.level;
@@ -725,6 +729,8 @@ NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset
             return result;
         }
 
+        // patch 首记录解析出 Proxy 自身的真实点范围，随后同一个工作任务即可继续
+        // 读取 octree.bin，避免主线程应用 patch 后再往返提交第二次请求。
         const HierarchyNodePatch& rootPatch = result.hierarchyPatch.nodes.front();
         pointRequest.type = rootPatch.type;
         pointRequest.hierarchyState = HierarchyState::Resolved;
@@ -737,6 +743,7 @@ NodeLoadResult Potree2Provider::ensureNodeReady(const PointCloudDataset& dataset
         }
     }
 
+    // 普通/叶节点从这里直接进入点数据 IO 与 CPU 解码；结果稍后由主线程验证。
     result.pointData = loadNodeData(dataset, pointRequest, &error);
     if (!result.pointData) {
         result.error = error;
@@ -831,6 +838,8 @@ bool Potree2Provider::applyHierarchyPatch(PointCloudDataset* dataset,
                                           const HierarchyPatch& patch,
                                           QString* errorMessage) const
 {
+    // 与 loadHierarchyPatch() 不同，本函数会创建/修改 live OctreeNode，因此只能
+    // 从 PointCloudRuntime::applyCompletedResults() 的主/update线程调用。
     if (errorMessage) {
         errorMessage->clear();
     }

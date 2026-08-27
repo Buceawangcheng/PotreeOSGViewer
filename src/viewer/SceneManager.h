@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "viewer/PotreeColorMode.h"
 
@@ -17,6 +17,8 @@ struct BoundingBox;
 struct PointCloudNodeData;
 class PotreeSceneBackend;
 
+// 应用层场景门面。PointCloudRuntime 通过它调用 PotreeSceneBackend，而不直接依赖
+// Geometry/VBO 的具体构造方式；这些接口仍属于主/update线程边界。
 class SceneManager
 {
 public:
@@ -34,6 +36,7 @@ public:
                         const PointCloudNodeData& data,
                         float pointSize,
                         QString* errorMessage);
+    // 开始新的流式 Potree layer；后续节点由 attachPotreeNode() 增量加入。
     void beginPotreeLayer(const PointCloudDataset& dataset, float pointSize);
     bool attachPotreeNode(const std::string& nodeId,
                           std::uint32_t level,
