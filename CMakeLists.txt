@@ -334,7 +334,14 @@ add_custom_command(TARGET PotreeOSGViewer POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "$<IF:$<CONFIG:Debug>,${OSG_PLUGINS_DEBUG},${OSG_PLUGINS_RELEASE}>"
         "$<TARGET_FILE_DIR:PotreeOSGViewer>/osgPlugins-${OSG_PLUGIN_VERSION}"
-    COMMENT "Deploying Qt, osgQt and OSG plugin runtime files"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        "$<TARGET_FILE_DIR:PotreeOSGViewer>"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party_licenses"
+        "$<TARGET_FILE_DIR:PotreeOSGViewer>/third_party_licenses"
+    COMMENT "Deploying runtime files and license notices"
 )
 
 message(STATUS "Qt root: ${QT_ROOT_DIR}")

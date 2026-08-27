@@ -95,3 +95,18 @@ cmake --build build --config Debug
 ## 未实现功能
 
 - Eye-Dome Lighting（EDL）。
+
+## 许可证
+
+PotreeOSGViewer 的原创代码采用
+[BSD-2-Clause](LICENSE) 许可证。允许个人和企业使用、修改、商用及再发布，
+但源代码和二进制再发布都必须保留版权、许可条件和免责声明。
+
+Qt、OpenSceneGraph、osgQt、Potree、PotreeConverter 以及 Turbo colormap 等
+第三方组件和资源继续适用各自的许可证，完整关系与直接依赖许可证索引见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 和
+[`third_party_licenses/`](third_party_licenses/README.md)。
+
+发布包含 Qt、osgQt、OpenSceneGraph 插件或其他 DLL 的二进制包时，还需要根据
+最终打包内容补齐全部传递依赖的许可证，并满足 Qt LGPL-3.0 的动态链接、可替换性
+和对应源代码提供要求。

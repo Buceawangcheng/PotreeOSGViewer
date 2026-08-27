@@ -1,0 +1,12 @@
+Google Turbo colormap
+
+Copyright 2019 Google LLC.
+SPDX-License-Identifier: Apache-2.0
+
+Original author: Anton Mikhailov.
+Project description:
+https://research.google/blog/turbo-an-improved-rainbow-colormap-for-visualization/
+
+PotreeOSGViewer's resources/colormaps/turbo.ppm contains a sampled
+representation of the Turbo colormap. The Apache License 2.0 text is included
+in Apache-2.0.txt in this directory.
