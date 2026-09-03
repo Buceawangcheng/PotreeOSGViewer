@@ -18,6 +18,7 @@
 #include <osg/StateSet>
 
 #include <array>
+#include <cmath>
 #include <limits>
 
 namespace
@@ -120,8 +121,26 @@ void PotreeSceneBackend::beginLayer(const PointCloudDataset& dataset, float poin
 {
     clear();
     m_pointSize = pointSize;
-    m_heightMinimum = static_cast<float>(dataset.bounds.min.z());
-    m_heightMaximum = static_cast<float>(dataset.bounds.max.z());
+    double heightMinimum = dataset.bounds.min.z();
+    double heightMaximum = dataset.bounds.max.z();
+    const PointAttribute* positionAttribute = dataset.attributes.find("position");
+    if (positionAttribute
+        && positionAttribute->min.size() >= 3
+        && positionAttribute->max.size() >= 3
+        && std::isfinite(positionAttribute->min[2])
+        && std::isfinite(positionAttribute->max[2])
+        && positionAttribute->max[2] > positionAttribute->min[2]) {
+        // Potree 的 boundingBox 为八叉树使用的立方体，不一定是点云的紧包围盒。
+        // 高度色带应优先使用 position 属性记录的真实 Z 范围。
+        heightMinimum = positionAttribute->min[2];
+        heightMaximum = positionAttribute->max[2];
+    }
+    // 所有节点顶点都使用 dataset.bounds.min.z() 作为统一的局部 Z 原点。
+    // 高度范围也先在 CPU double 中转成相同参考系，再传给 GPU，既避免绝对大数
+    // 精度损失，也不会因动态节点切换各自的 Z 原点而产生色带断层。
+    const double heightReference = dataset.bounds.min.z();
+    m_heightMinimum = static_cast<float>(heightMinimum - heightReference);
+    m_heightMaximum = static_cast<float>(heightMaximum - heightReference);
     if (m_shaderState->isInitialized()) {
         m_shaderState->setPointSize(m_pointSize);
         m_shaderState->setHeightRange(m_heightMinimum, m_heightMaximum);
@@ -205,7 +224,7 @@ bool PotreeSceneBackend::attachNode(const std::string& nodeId,
     geode->setNodeMask(PotreeRenderMasks::Points);
     geode->addDrawable(geometry.get());
     if (m_shaderState->isInitialized()) {
-        m_shaderState->applyTo(geode->getOrCreateStateSet(), level, data.origin.z());
+        m_shaderState->applyTo(geode->getOrCreateStateSet(), level);
     }
 
     osg::ref_ptr<osg::Geode> boundingBoxGeode = createBoundingBoxGeode(

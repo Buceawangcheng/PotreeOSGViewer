@@ -123,8 +123,7 @@ bool PointCloudShaderState::isInitialized() const
 }
 
 void PointCloudShaderState::applyTo(osg::StateSet* stateSet,
-                                    std::uint32_t level,
-                                    double nodeOriginZ) const
+                                    std::uint32_t level) const
 {
     if (!stateSet || !m_program.valid()) {
         return;
@@ -145,7 +144,6 @@ void PointCloudShaderState::applyTo(osg::StateSet* stateSet,
     stateSet->addUniform(m_turboSamplerUniform.get());
     stateSet->addUniform(m_lodSamplerUniform.get());
     stateSet->addUniform(new osg::Uniform("uLodLevel", static_cast<int>(level)));
-    stateSet->addUniform(new osg::Uniform("uNodeOriginZ", static_cast<float>(nodeOriginZ)));
 }
 
 void PointCloudShaderState::setColorMode(PotreeColorMode mode)

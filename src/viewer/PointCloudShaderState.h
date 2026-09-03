@@ -16,9 +16,7 @@ class PointCloudShaderState
 public:
     bool initialize(QString* errorMessage = nullptr);
     bool isInitialized() const;
-    void applyTo(osg::StateSet* stateSet,
-                 std::uint32_t level,
-                 double nodeOriginZ) const;
+    void applyTo(osg::StateSet* stateSet, std::uint32_t level) const;
     void setColorMode(PotreeColorMode mode);
     void setPointSize(float value);
     void setHeightRange(float minimum, float maximum);

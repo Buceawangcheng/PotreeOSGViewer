@@ -636,7 +636,11 @@ std::shared_ptr<PointCloudNodeData> Potree2Provider::loadNodeData(
     }
 
     auto data = std::make_shared<PointCloudNodeData>();
-    data->origin = node->bounds.min;
+    // X/Y 继续采用节点局部原点以保持大平面坐标精度；所有节点的 Z 则采用
+    // 数据集统一原点，使高度着色不会依赖逐节点 Z offset uniform。
+    data->origin.set(node->bounds.min.x(),
+                     node->bounds.min.y(),
+                     dataset.bounds.min.z());
     data->positions.resize(static_cast<std::size_t>(node->pointCount));
     data->colors.resize(static_cast<std::size_t>(node->pointCount));
 

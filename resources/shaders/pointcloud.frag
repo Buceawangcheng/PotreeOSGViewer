@@ -8,7 +8,7 @@ uniform float uHeightMax;
 
 in vec4 vOriginalColor;
 flat in int vLodLevel;
-in float vWorldHeight;
+in float vHeightAboveMinimum;
 out vec4 fragmentColor;
 
 void main()
@@ -25,7 +25,7 @@ void main()
     } else if (uColorMode == 2) {
         float range = uHeightMax - uHeightMin;
         float heightFactor = abs(range) > 1e-6
-            ? clamp((vWorldHeight - uHeightMin) / range, 0.0, 1.0)
+            ? clamp((vHeightAboveMinimum - uHeightMin) / range, 0.0, 1.0)
             : 0.5;
         color = texture(uTurboPalette, heightFactor);
     }

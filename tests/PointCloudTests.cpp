@@ -162,13 +162,13 @@ QByteArray metadataBytes(int firstChunkSize, const QString& encoding)
     hierarchy.insert(QStringLiteral("depth"), 1);
 
     QJsonObject bounds;
-    bounds.insert(QStringLiteral("min"), vec3(100.0, 200.0, 300.0));
-    bounds.insert(QStringLiteral("max"), vec3(101.0, 201.0, 301.0));
+    bounds.insert(QStringLiteral("min"), vec3(100.0, 200.0, 1000000000.0));
+    bounds.insert(QStringLiteral("max"), vec3(1100.0, 1200.0, 1000001000.0));
 
     QJsonArray attributes;
     QJsonObject position = attribute(QStringLiteral("position"), 12, 3, 4, QStringLiteral("int32"));
-    position.insert(QStringLiteral("min"), vec3(100.0, 200.0, 300.0));
-    position.insert(QStringLiteral("max"), vec3(101.0, 201.0, 301.0));
+    position.insert(QStringLiteral("min"), vec3(100.0, 200.0, 1000000000.0));
+    position.insert(QStringLiteral("max"), vec3(101.0, 201.0, 1000000001.0));
     attributes.append(position);
     attributes.append(attribute(QStringLiteral("rgb"), 6, 3, 2, QStringLiteral("uint16")));
 
@@ -178,7 +178,7 @@ QByteArray metadataBytes(int firstChunkSize, const QString& encoding)
     root.insert(QStringLiteral("points"), 2);
     root.insert(QStringLiteral("encoding"), encoding);
     root.insert(QStringLiteral("spacing"), 1.0);
-    root.insert(QStringLiteral("offset"), vec3(100.0, 200.0, 300.0));
+    root.insert(QStringLiteral("offset"), vec3(100.0, 200.0, 1000000000.0));
     root.insert(QStringLiteral("scale"), vec3(0.01, 0.01, 0.01));
     root.insert(QStringLiteral("hierarchy"), hierarchy);
     root.insert(QStringLiteral("boundingBox"), bounds);
@@ -885,8 +885,8 @@ void testPotreeSceneMultipleNodes()
                "r", 0, dataset->bounds, *dataset, *data, 3.0f, &error),
            "first Potree node should attach");
     BoundingBox shiftedBounds = dataset->bounds;
-    shiftedBounds.min += osg::Vec3d(1.0, 0.0, 0.0);
-    shiftedBounds.max += osg::Vec3d(1.0, 0.0, 0.0);
+    shiftedBounds.min += osg::Vec3d(1.0, 0.0, 0.25);
+    shiftedBounds.max += osg::Vec3d(1.0, 0.0, 0.25);
     expect(scene.attachPotreeNode(
                "r1", 1, shiftedBounds, *dataset, shifted, 3.0f, &error),
            "second Potree node should attach");
@@ -971,6 +971,20 @@ void testPotreeSceneMultipleNodes()
     expect(firstColorMode->get(colorMode)
                && colorMode == static_cast<int>(PotreeColorMode::Height),
            "Height mode should update the shared color mode uniform");
+    osg::Uniform* heightMinUniform = firstPointState
+        ? firstPointState->getUniform("uHeightMin")
+        : nullptr;
+    osg::Uniform* heightMaxUniform = firstPointState
+        ? firstPointState->getUniform("uHeightMax")
+        : nullptr;
+    float heightMinimum = -1.0f;
+    float heightMaximum = -1.0f;
+    expect(heightMinUniform && heightMaxUniform
+               && heightMinUniform->get(heightMinimum)
+               && heightMaxUniform->get(heightMaximum)
+               && near(heightMinimum, 0.0f)
+               && near(heightMaximum, 1.0f),
+           "Height Shader inputs should use the tight range in the shared Z reference frame");
     scene.setPointSize(7.0f);
     osg::Uniform* pointSizeUniform = firstPointState
         ? firstPointState->getUniform("uPointSize")

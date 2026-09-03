@@ -2,11 +2,10 @@
 
 uniform float uPointSize;
 uniform int uLodLevel;
-uniform float uNodeOriginZ;
 
 out vec4 vOriginalColor;
 flat out int vLodLevel;
-out float vWorldHeight;
+out float vHeightAboveMinimum;
 
 void main()
 {
@@ -14,5 +13,5 @@ void main()
     gl_PointSize = max(uPointSize, 1.0);
     vOriginalColor = gl_Color;
     vLodLevel = uLodLevel;
-    vWorldHeight = gl_Vertex.z + uNodeOriginZ;
+    vHeightAboveMinimum = gl_Vertex.z;
 }
